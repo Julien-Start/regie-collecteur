@@ -120,11 +120,11 @@ def supa_get(env, path):
 
 CATEGORIES = (
     "cavalier", "facture", "devis", "client", "partenaire", "fournisseur",
-    "admin", "immobilier", "technique", "rdv", "perso", "spam", "autre",
+    "admin", "immobilier", "technique", "rdv", "alcove", "perso", "spam", "autre",
 )
 
 
-def claude_classify(api_key, exemples, from_addr, sujet, snippet):
+def claude_classify(api_key, exemples, suppr_ex, from_addr, sujet, snippet):
     # Classe sur le CONTENU. Les corrections de Julien servent d'exemples (few-shot).
     fewshot = "\n".join(
         f"- de:{e.get('from_addr','')} | objet:{(e.get('sujet') or '')[:80]} -> {e.get('categorie')}"
@@ -144,17 +144,31 @@ def claude_classify(api_key, exemples, from_addr, sujet, snippet):
         "immobilier = SCI, locataire, loyer, bail, notaire, agence immobilière ; "
         "technique = problème ou support technique d'un site/plateforme (Vimeo, WordPress, bug, panne, mot de passe d'un outil) ; "
         "rdv = prise de rendez-vous, proposition de créneau, invitation agenda ; "
+        "alcove = ce qui concerne l'activité L'Alcove de Julien ; "
         "perso = personnel, privé, famille, amis ; "
         "spam = démarchage non sollicité, indésirable, arnaque ; "
         "autre = le reste.\n"
         "Classe sur le CONTENU, pas seulement l'expéditeur (un même expéditeur peut varier).\n"
         + ("Exemples de classements de Julien :\n" + fewshot + "\n" if fewshot else "")
-        + "Réponds UNIQUEMENT par le mot exact de la catégorie."
     )
+    # Apprentissage des suppressions (sécurité : juste une SUGGESTION, jamais auto).
+    suppr_fewshot = "\n".join(
+        f"- de:{e.get('from_addr','')} | objet:{(e.get('sujet') or '')[:80]}"
+        for e in (suppr_ex or [])[:20]
+    )
+    if suppr_fewshot:
+        system += (
+            "\nJulien a déjà SUPPRIMÉ des mails ressemblant à ceci :\n" + suppr_fewshot + "\n"
+            "Mets supprimer=true UNIQUEMENT si ce mail ressemble FORTEMENT à ces exemples ; sinon false."
+        )
+    else:
+        system += "\nAucun exemple de suppression connu : mets toujours supprimer=false."
+    system += '\nRéponds en JSON strict, rien d\'autre : {"categorie":"<un mot de la liste>","supprimer":true|false}'
+
     user = f"De : {from_addr}\nObjet : {sujet}\nDébut du message : {(snippet or '')[:400]}"
     body = json.dumps({
         "model": "claude-haiku-4-5",
-        "max_tokens": 8,
+        "max_tokens": 40,
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }).encode("utf-8")
@@ -164,13 +178,19 @@ def claude_classify(api_key, exemples, from_addr, sujet, snippet):
     try:
         with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
             j = json.loads(r.read().decode("utf-8"))
-        txt = (j.get("content", [{}])[0].get("text", "") or "").strip().lower()
-        for c in CATEGORIES:
-            if c in txt:
-                return c
-        return "autre"
+        txt = (j.get("content", [{}])[0].get("text", "") or "").strip()
+        cat, suppr = "autre", False
+        try:
+            obj = json.loads(txt[txt.find("{"): txt.rfind("}") + 1])
+            c = str(obj.get("categorie", "")).strip().lower()
+            cat = c if c in CATEGORIES else "autre"
+            suppr = bool(obj.get("supprimer", False))
+        except Exception:
+            low = txt.lower()
+            cat = next((c for c in CATEGORIES if c in low), "autre")
+        return {"categorie": cat, "supprimer": suppr}
     except Exception:
-        return categorize_fallback(sujet, snippet)
+        return {"categorie": categorize_fallback(sujet, snippet), "supprimer": False}
 
 
 def supa_upsert(env, rows):
@@ -196,6 +216,75 @@ def supa_upsert(env, rows):
         return False, str(e)
 
 
+def supa_patch(env, path, payload):
+    url = env.get("SUPABASE_URL", "").rstrip("/")
+    key = env.get("SUPABASE_SERVICE_KEY", "")
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(f"{url}/rest/v1/{path}", data=data, method="PATCH", headers={
+        "apikey": key, "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json", "Prefer": "return=minimal",
+    })
+    try:
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
+def process_deletions(env, accounts):
+    # Supprime (DÉPLACE EN CORBEILLE) les mails que Julien a marqués 'a_supprimer'.
+    # Jamais de suppression définitive : si pas de Corbeille atteignable, on n'efface PAS.
+    to_del = supa_get(env, "mails?statut=eq.a_supprimer&select=id,boite,message_id")
+    if not to_del:
+        return
+    acc_by_email = {a["email"]: a for a in accounts}
+    by_box = {}
+    for m in to_del:
+        by_box.setdefault(m.get("boite"), []).append(m)
+
+    total = 0
+    for boite, mails in by_box.items():
+        acc = acc_by_email.get(boite)
+        if not acc or not acc.get("password"):
+            continue
+        try:
+            M = imaplib.IMAP4_SSL(acc.get("server", "imap.ionos.fr"), acc.get("port", 993))
+            M.login(acc["email"], acc["password"])
+            M.select("INBOX")  # mode écriture
+        except Exception as e:
+            print(f"  ⚠️ suppression : connexion {boite} échouée : {e}")
+            continue
+        for m in mails:
+            mid = (m.get("message_id") or "").strip()
+            moved = False
+            if mid.startswith("<"):
+                try:
+                    typ, data = M.search(None, "HEADER", "Message-ID", mid)
+                    ids = data[0].split() if data and data[0] else []
+                    if ids:
+                        for trash in ("Trash", "INBOX.Trash", "Corbeille", "INBOX.Corbeille"):
+                            try:
+                                if all(M.copy(num, trash)[0] == "OK" for num in ids):
+                                    moved = True
+                                    break
+                            except Exception:
+                                continue
+                        if moved:  # uniquement si bien copié en Corbeille
+                            for num in ids:
+                                M.store(num, "+FLAGS", "\\Deleted")
+                            M.expunge()
+                except Exception as e:
+                    print(f"  ⚠️ suppression {mid[:30]} : {e}")
+            supa_patch(env, f"mails?id=eq.{m['id']}", {"statut": "supprime" if moved else "suppr_echec"})
+            total += 1 if moved else 0
+        try:
+            M.logout()
+        except Exception:
+            pass
+    if total:
+        print(f"🗑️  {total} mail(s) déplacé(s) en Corbeille.")
+
+
 def main():
     accounts = load_json("comptes.json")
     if not accounts:
@@ -208,11 +297,13 @@ def main():
 
     # Mails déjà connus : préserve tes corrections + évite de reclasser inutilement.
     existing = {}
-    for r in supa_get(env, "mails?select=message_id,categorie,corrige"):
+    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr"):
         if r.get("message_id"):
             existing[r["message_id"]] = r
     # Tes corrections passées = exemples pour guider Claude.
     exemples = supa_get(env, "tri_exemples?select=from_addr,sujet,categorie&order=created_at.desc&limit=25")
+    # Tes suppressions passées = exemples pour SUGGÉRER (jamais supprimer auto).
+    suppr_ex = supa_get(env, "suppr_exemples?select=from_addr,sujet&order=created_at.desc&limit=20")
     api_key = env.get("ANTHROPIC_API_KEY", "")
     if api_key:
         print(f"🧠 Tri Claude actif ({len(exemples)} exemples appris).")
@@ -253,12 +344,15 @@ def main():
                     date_iso = None
                 msgid = (msg.get("Message-ID") or f"{acc['email']}|{num.decode()}|{sujet[:40]}").strip()
                 prev = existing.get(msgid)
+                sug = False
                 if prev:
                     cat = prev.get("categorie") or "autre"   # déjà classé/corrigé -> on garde
+                    sug = bool(prev.get("suggestion_suppr"))  # on préserve la suggestion
                 elif is_news:
                     cat = "newsletter"
                 elif api_key:
-                    cat = claude_classify(api_key, exemples, addr, sujet, snip)
+                    res = claude_classify(api_key, exemples, suppr_ex, addr, sujet, snip)
+                    cat, sug = res["categorie"], res["supprimer"]
                 else:
                     cat = categorize_fallback(sujet, snip)
                 rows.append({
@@ -271,6 +365,7 @@ def main():
                     "date_recue": date_iso,
                     "snippet": snip,
                     "categorie": cat,
+                    "suggestion_suppr": sug,
                     "is_newsletter": is_news,
                     "unsubscribe_url": unsubscribe_link(msg.get("List-Unsubscribe")),
                 })
@@ -288,6 +383,9 @@ def main():
                 print(f"  ✅ {len(rows)} mails rangés ({news} newsletters)")
             else:
                 print(f"  ❌ envoi Supabase échoué : {info}")
+
+    # Traite les suppressions demandées par Julien (déplacement en Corbeille).
+    process_deletions(env, accounts)
 
     print(f"\n✅ Terminé : {total_push} mails dans la Régie. Ouvre le cockpit, onglet Mails.")
 
