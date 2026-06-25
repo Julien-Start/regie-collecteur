@@ -1,0 +1,23 @@
+name: Collecte des mails
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # toutes les 5 min (gratuit : dépôt public = Actions illimité)
+  workflow_dispatch: {}
+
+concurrency:
+  group: collecte-mails
+  cancel-in-progress: false
+
+jobs:
+  collecte:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Relever les boîtes et trier
+        env:
+          COMPTES_JSON: ${{ secrets.COMPTES_JSON }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 collect.py
