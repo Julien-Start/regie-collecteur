@@ -75,7 +75,8 @@ def unsubscribe_link(value):
     return ("mailto:" + m.group(1)) if m else ""
 
 
-def body_snippet(msg, limit=320):
+def body_text(msg):
+    # Texte complet du message (sauts de ligne conservés pour la lecture).
     text = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -90,6 +91,7 @@ def body_snippet(msg, limit=320):
                 if part.get_content_type() == "text/html":
                     try:
                         html = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", "replace")
+                        html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
                         text = re.sub(r"<[^>]+>", " ", html)
                         break
                     except Exception:
@@ -99,8 +101,9 @@ def body_snippet(msg, limit=320):
             text = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", "replace")
         except Exception:
             text = ""
-    text = re.sub(r"\s+", " ", text).strip()
-    return clean(text[:limit])
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]*\n\s*", "\n\n", text).strip()
+    return clean(text)
 
 
 def categorize_fallback(sujet, snippet):
@@ -344,7 +347,9 @@ def main():
                 addr = clean(addr)
                 is_news = bool(msg.get("List-Unsubscribe") or msg.get("List-Id"))
                 sujet = dec(msg.get("Subject")) or "(sans objet)"
-                snip = body_snippet(msg)
+                full = body_text(msg)
+                snip = re.sub(r"\s+", " ", full)[:320]
+                corps = full[:15000]
                 try:
                     dt = parsedate_to_datetime(msg.get("Date"))
                     date_iso = dt.isoformat() if dt else None
@@ -372,6 +377,7 @@ def main():
                     "sujet": sujet,
                     "date_recue": date_iso,
                     "snippet": snip,
+                    "corps": corps,
                     "categorie": cat,
                     "suggestion_suppr": sug,
                     "is_newsletter": is_news,
