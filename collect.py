@@ -12,6 +12,13 @@ from email.utils import parseaddr, parsedate_to_datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 PER_BOX = 30  # nb de derniers mails relevés par boîte
 
+# Postgres refuse le caractère NUL et les caractères de contrôle dans du texte.
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def clean(s):
+    return _CTRL.sub("", s) if isinstance(s, str) else s
+
 
 def dec(s):
     if not s:
@@ -25,7 +32,7 @@ def dec(s):
                 out += txt.decode("latin-1", "replace")
         else:
             out += txt
-    return out.replace("\n", " ").replace("\r", " ").strip()
+    return clean(out.replace("\n", " ").replace("\r", " ").strip())
 
 
 def load_json(name):
@@ -93,7 +100,7 @@ def body_snippet(msg, limit=320):
         except Exception:
             text = ""
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit]
+    return clean(text[:limit])
 
 
 def categorize_fallback(sujet, snippet):
@@ -334,6 +341,7 @@ def main():
                     continue
                 msg = email.message_from_bytes(md[0][1])
                 name, addr = parseaddr(msg.get("From", ""))
+                addr = clean(addr)
                 is_news = bool(msg.get("List-Unsubscribe") or msg.get("List-Id"))
                 sujet = dec(msg.get("Subject")) or "(sans objet)"
                 snip = body_snippet(msg)
