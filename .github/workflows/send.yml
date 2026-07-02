@@ -1,0 +1,20 @@
+name: Envoi des réponses
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: envoi-reponses
+  cancel-in-progress: false
+
+jobs:
+  envoi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Envoyer les réponses validées
+        env:
+          COMPTES_JSON: ${{ secrets.COMPTES_JSON }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python3 send.py
