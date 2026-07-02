@@ -79,11 +79,15 @@ def htmlify(text):
     return esc.replace("\n", "<br>\n")
 
 
-def send_one(acc, mail, logo_fn):
+def send_one(acc, mail, sig):
     dest = (mail.get("from_addr") or "").strip()
     body = (mail.get("brouillon") or "").strip()
     if not dest or not body:
         return False, "destinataire ou brouillon vide"
+    sig = sig or {}
+    text_sig = (sig.get("texte") or "").strip()
+    html_sig = (sig.get("html") or "").strip()
+    logo_fn = sig.get("logo")
 
     msg = EmailMessage()
     msg["From"] = formataddr((acc.get("label") or "", acc["email"]))
@@ -95,19 +99,25 @@ def send_one(acc, mail, logo_fn):
         msg["References"] = ref
     msg["Message-ID"] = make_msgid(domain=acc["email"].split("@")[-1])
 
-    # Partie texte (repli universel).
-    msg.set_content(body)
+    # Partie TEXTE (repli universel) : corps + signature texte.
+    plain = body + (("\n\n" + text_sig) if text_sig else "")
+    msg.set_content(plain)
 
-    # Partie HTML (+ logo embarqué en dur si la boîte en a un).
-    html_body = ('<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,'
-                 'sans-serif;font-size:14px;color:#222;line-height:1.5;">%s</div>' % htmlify(body))
+    # Partie HTML : corps + signature (HTML riche si dispo, sinon texte) + logo embarqué.
+    parts = ['<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,'
+             'sans-serif;font-size:14px;color:#222;line-height:1.5;">', htmlify(body)]
+    if html_sig:
+        parts.append('<br><br>' + html_sig)
+    elif text_sig:
+        parts.append('<br><br>' + htmlify(text_sig))
     lp = logo_path(logo_fn)
     cid = None
     if lp:
         cid = make_msgid(domain=acc["email"].split("@")[-1])
-        html_body += ('<br><br><img src="cid:%s" width="600" '
-                      'style="max-width:100%%;height:auto;display:block;" alt="">' % cid.strip("<>"))
-    msg.add_alternative(html_body, subtype="html")
+        parts.append('<br><br><img src="cid:%s" width="600" '
+                     'style="max-width:100%%;height:auto;display:block;" alt="">' % cid.strip("<>"))
+    parts.append('</div>')
+    msg.add_alternative("".join(parts), subtype="html")
     if lp:
         html_part = msg.get_payload()[-1]
         with open(lp, "rb") as fh:
@@ -129,11 +139,11 @@ def main():
     acc_by_email = {a["email"]: a for a in accounts}
     acc_by_label = {a.get("label", a["email"]): a for a in accounts}
 
-    # Logo par boîte (colonne signatures.logo).
-    logos = {}
+    # Signatures par boîte (texte repli + HTML riche + logo).
+    sigs = {}
     try:
-        for s in supa_get(e, "signatures?select=compte,logo"):
-            logos[s["compte"]] = s.get("logo")
+        for s in supa_get(e, "signatures?select=compte,texte,html,logo"):
+            sigs[s["compte"]] = s
     except Exception:
         pass
 
@@ -147,9 +157,9 @@ def main():
             print(f"   ⏭️  mail {mail['id']} : compte introuvable / sans mot de passe.")
             supa_write(e, f"mails?id=eq.{mail['id']}", {"envoi_demande": False})
             continue
-        logo_fn = logos.get(mail.get("boite"))
+        sig = sigs.get(mail.get("boite"))
         try:
-            ok, why = send_one(acc, mail, logo_fn)
+            ok, why = send_one(acc, mail, sig)
         except Exception as ex:
             ok, why = False, str(ex)
         if ok:
