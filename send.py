@@ -4,9 +4,11 @@
 # envoi_demande=true, envoie le brouillon (validé/corrigé) via le SMTP de la boîte,
 # marque le mail répondu, et mémorise la réponse envoyée pour l'apprentissage du ton.
 #
-# Stdlib uniquement (smtplib/email/json/urllib). Mots de passe : COMPTES_JSON (secret).
+# Envoi en multipart : texte simple + HTML (avec logo embarqué en CID si la boîte
+# en a un). Stdlib uniquement. Mots de passe : COMPTES_JSON (secret).
 
-import os, json, smtplib, ssl, urllib.request, urllib.error
+import os, re, json, smtplib, ssl, urllib.request, urllib.error
+import html as htmllib
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
@@ -49,8 +51,7 @@ def supa_write(e, path, payload, method="PATCH"):
 
 def smtp_host(server):
     # imap.ionos.fr -> smtp.ionos.fr, imap.gmail.com -> smtp.gmail.com, etc.
-    s = (server or "imap.ionos.fr").replace("imap", "smtp")
-    return s
+    return (server or "imap.ionos.fr").replace("imap", "smtp")
 
 
 def re_subject(sujet):
@@ -58,7 +59,27 @@ def re_subject(sujet):
     return s if s.lower().startswith("re:") else f"Re: {s}"
 
 
-def send_one(acc, mail):
+def logo_path(fn):
+    if not fn:
+        return None
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logos", fn)
+    return p if os.path.exists(p) else None
+
+
+def htmlify(text):
+    # Texte -> HTML : échappe, transforme liens et emails en <a>, sauts de ligne en <br>.
+    esc = htmllib.escape(text)
+    esc = re.sub(
+        r'((?:https?://|www\.)[^\s<]+)',
+        lambda m: '<a href="%s">%s</a>' % (
+            m.group(1) if m.group(1).startswith("http") else "https://" + m.group(1), m.group(1)),
+        esc,
+    )
+    esc = re.sub(r'([\w.+-]+@[\w-]+\.[\w.-]+)', r'<a href="mailto:\1">\1</a>', esc)
+    return esc.replace("\n", "<br>\n")
+
+
+def send_one(acc, mail, logo_fn):
     dest = (mail.get("from_addr") or "").strip()
     body = (mail.get("brouillon") or "").strip()
     if not dest or not body:
@@ -73,11 +94,27 @@ def send_one(acc, mail):
         msg["In-Reply-To"] = ref
         msg["References"] = ref
     msg["Message-ID"] = make_msgid(domain=acc["email"].split("@")[-1])
+
+    # Partie texte (repli universel).
     msg.set_content(body)
 
+    # Partie HTML (+ logo embarqué en dur si la boîte en a un).
+    html_body = ('<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,'
+                 'sans-serif;font-size:14px;color:#222;line-height:1.5;">%s</div>' % htmlify(body))
+    lp = logo_path(logo_fn)
+    cid = None
+    if lp:
+        cid = make_msgid(domain=acc["email"].split("@")[-1])
+        html_body += ('<br><br><img src="cid:%s" width="600" '
+                      'style="max-width:100%%;height:auto;display:block;" alt="">' % cid.strip("<>"))
+    msg.add_alternative(html_body, subtype="html")
+    if lp:
+        html_part = msg.get_payload()[-1]
+        with open(lp, "rb") as fh:
+            html_part.add_related(fh.read(), maintype="image", subtype="png", cid=cid)
+
     host = smtp_host(acc.get("server"))
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(host, 465, context=ctx, timeout=30) as s:
+    with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
         s.login(acc["email"], acc["password"])
         s.send_message(msg)
     return True, "ok"
@@ -92,6 +129,14 @@ def main():
     acc_by_email = {a["email"]: a for a in accounts}
     acc_by_label = {a.get("label", a["email"]): a for a in accounts}
 
+    # Logo par boîte (colonne signatures.logo).
+    logos = {}
+    try:
+        for s in supa_get(e, "signatures?select=compte,logo"):
+            logos[s["compte"]] = s.get("logo")
+    except Exception:
+        pass
+
     pending = supa_get(e, "mails?envoi_demande=eq.true&repondu=eq.false"
                           "&select=id,compte,boite,from_addr,message_id,sujet,brouillon,categorie,corps")
     print(f"✉️  {len(pending)} réponse(s) à envoyer.")
@@ -102,8 +147,9 @@ def main():
             print(f"   ⏭️  mail {mail['id']} : compte introuvable / sans mot de passe.")
             supa_write(e, f"mails?id=eq.{mail['id']}", {"envoi_demande": False})
             continue
+        logo_fn = logos.get(mail.get("boite"))
         try:
-            ok, why = send_one(acc, mail)
+            ok, why = send_one(acc, mail, logo_fn)
         except Exception as ex:
             ok, why = False, str(ex)
         if ok:
