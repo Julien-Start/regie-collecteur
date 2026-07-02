@@ -87,7 +87,13 @@ def send_one(acc, mail, sig):
     sig = sig or {}
     text_sig = (sig.get("texte") or "").strip()
     html_sig = (sig.get("html") or "").strip()
-    logo_fn = sig.get("logo")
+    logo_fn = sig.get("logo")           # image simple héritée (bannière seule)
+    images = sig.get("images") or {}    # map { cid: fichier.png } embarquée dans le HTML
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except Exception:
+            images = {}
 
     msg = EmailMessage()
     msg["From"] = formataddr((acc.get("label") or "", acc["email"]))
@@ -103,25 +109,34 @@ def send_one(acc, mail, sig):
     plain = body + (("\n\n" + text_sig) if text_sig else "")
     msg.set_content(plain)
 
-    # Partie HTML : corps + signature (HTML riche si dispo, sinon texte) + logo embarqué.
+    # Partie HTML : corps + signature (HTML riche si dispo, sinon texte).
     parts = ['<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,'
              'sans-serif;font-size:14px;color:#222;line-height:1.5;">', htmlify(body)]
     if html_sig:
         parts.append('<br><br>' + html_sig)
     elif text_sig:
         parts.append('<br><br>' + htmlify(text_sig))
-    lp = logo_path(logo_fn)
-    cid = None
-    if lp:
-        cid = make_msgid(domain=acc["email"].split("@")[-1])
+    # Image simple héritée (bannière seule, si pas de map images).
+    legacy_cid = None
+    lp_legacy = logo_path(logo_fn) if (logo_fn and not images) else None
+    if lp_legacy:
+        legacy_cid = make_msgid(domain=acc["email"].split("@")[-1])
         parts.append('<br><br><img src="cid:%s" width="600" '
-                     'style="max-width:100%%;height:auto;display:block;" alt="">' % cid.strip("<>"))
+                     'style="max-width:100%%;height:auto;display:block;" alt="">' % legacy_cid.strip("<>"))
     parts.append('</div>')
     msg.add_alternative("".join(parts), subtype="html")
-    if lp:
-        html_part = msg.get_payload()[-1]
-        with open(lp, "rb") as fh:
-            html_part.add_related(fh.read(), maintype="image", subtype="png", cid=cid)
+
+    # Images embarquées (CID) : la map { cid: fichier } référencée dans le HTML riche,
+    # + l'éventuelle image simple héritée. Toutes attachées à la partie HTML.
+    html_part = msg.get_payload()[-1]
+    for cidname, fn in images.items():
+        lp = logo_path(fn)
+        if lp:
+            with open(lp, "rb") as fh:
+                html_part.add_related(fh.read(), maintype="image", subtype="png", cid="<%s>" % cidname)
+    if lp_legacy:
+        with open(lp_legacy, "rb") as fh:
+            html_part.add_related(fh.read(), maintype="image", subtype="png", cid=legacy_cid)
 
     host = smtp_host(acc.get("server"))
     with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
@@ -142,7 +157,7 @@ def main():
     # Signatures par boîte (texte repli + HTML riche + logo).
     sigs = {}
     try:
-        for s in supa_get(e, "signatures?select=compte,texte,html,logo"):
+        for s in supa_get(e, "signatures?select=compte,texte,html,logo,images"):
             sigs[s["compte"]] = s
     except Exception:
         pass
