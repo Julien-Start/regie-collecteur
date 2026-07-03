@@ -398,6 +398,11 @@ def main():
             else:
                 print(f"  ❌ envoi Supabase échoué : {info}")
 
+    # Inscriptions de nouveaux cavaliers (notifications du site) : pas de réponse
+    # attendue -> rangées automatiquement en 'cavalier' et marquées 'traité'.
+    supa_patch(env, "mails?sujet=ilike.*inscription*nouveau*compte*&statut=eq.a_traiter",
+               {"categorie": "cavalier", "is_newsletter": False, "statut": "traite"})
+
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
 
