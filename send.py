@@ -244,8 +244,9 @@ def main():
             }], method="POST")
             print(f"   ✅ envoyé -> {mail.get('from_addr')} (mail {mail['id']})")
         else:
-            # Pas de renvoi en boucle : on retire la demande, le mail reste à traiter.
-            supa_write(e, f"mails?id=eq.{mail['id']}", {"envoi_demande": False})
+            # Échec : on remet le mail "à traiter" (le cockpit l'avait passé en traité
+            # de façon optimiste au clic) et on retire la demande (pas de renvoi en boucle).
+            supa_write(e, f"mails?id=eq.{mail['id']}", {"envoi_demande": False, "statut": "a_traiter"})
             print(f"   ❌ échec mail {mail['id']} : {why}")
 
 
