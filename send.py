@@ -59,6 +59,18 @@ def re_subject(sujet):
     return s if s.lower().startswith("re:") else f"Re: {s}"
 
 
+def vrai_destinataire(from_addr, corps):
+    # Formulaire de contact du site : l'expéditeur est noreply@, la vraie adresse
+    # du cavalier est dans le corps ("Votre adresse e-mail : ..."). On répond à celle-là.
+    fa = (from_addr or "").lower()
+    if "noreply" not in fa and "no-reply" not in fa:
+        return from_addr
+    emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", corps or "")
+    ext = [e for e in emails if "dclik-agency.com" not in e.lower()
+           and "noreply" not in e.lower() and "no-reply" not in e.lower()]
+    return ext[0] if ext else from_addr
+
+
 def logo_path(fn):
     if not fn:
         return None
@@ -80,7 +92,7 @@ def htmlify(text):
 
 
 def send_one(acc, mail, sig):
-    dest = (mail.get("from_addr") or "").strip()
+    dest = (vrai_destinataire(mail.get("from_addr"), mail.get("corps")) or "").strip()
     body = (mail.get("brouillon") or "").strip()
     if not dest or not body:
         return False, "destinataire ou brouillon vide"

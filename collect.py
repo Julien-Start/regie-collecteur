@@ -403,6 +403,11 @@ def main():
     supa_patch(env, "mails?sujet=ilike.*inscription*nouveau*compte*&statut=eq.a_traiter",
                {"categorie": "cavalier", "is_newsletter": False, "statut": "traite"})
 
+    # Demandes de contact du site = cavaliers À QUI RÉPONDRE -> 'cavalier', à traiter,
+    # pas newsletter (l'envoi répondra à l'email du corps, pas au noreply@).
+    supa_patch(env, "mails?sujet=ilike.*demande*contact*&is_newsletter=eq.true",
+               {"categorie": "cavalier", "is_newsletter": False, "statut": "a_traiter"})
+
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
 
