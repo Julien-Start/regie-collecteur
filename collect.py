@@ -352,7 +352,7 @@ def main():
 
     # Mails déjà connus : préserve tes corrections + évite de reclasser inutilement.
     existing = {}
-    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr,pieces_jointes"):
+    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr,pieces_jointes,is_newsletter"):
         if r.get("message_id"):
             existing[r["message_id"]] = r
     # Tes corrections passées = exemples pour guider Claude.
@@ -407,6 +407,7 @@ def main():
                     cat = prev.get("categorie") or "autre"   # déjà classé/corrigé -> on garde
                     sug = bool(prev.get("suggestion_suppr"))  # on préserve la suggestion
                     pj = prev.get("pieces_jointes")          # déjà extraites -> on garde
+                    is_news = bool(prev.get("is_newsletter"))  # préserve la reclassification manuelle
                 elif is_news:
                     cat = "newsletter"
                     pj = extract_and_upload_pj(env, msg, msgid)
