@@ -7,10 +7,52 @@
 # Envoi en multipart : texte simple + HTML (avec logo embarqué en CID si la boîte
 # en a un). Stdlib uniquement. Mots de passe : COMPTES_JSON (secret).
 
-import os, re, json, smtplib, ssl, urllib.request, urllib.error
+import os, re, json, smtplib, ssl, imaplib, time, urllib.request, urllib.error
 import html as htmllib
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import formataddr, make_msgid, formatdate
+
+
+def find_sent_folder(M):
+    # Cherche le dossier "Envoyés" : d'abord le flag \Sent, sinon les noms courants.
+    try:
+        typ, data = M.list()
+        for line in (data or []):
+            s = line.decode("utf-8", "replace") if isinstance(line, bytes) else str(line)
+            if "\\Sent" in s:
+                m = re.search(r'"([^"]*)"\s*$', s) or re.search(r'([^ ]+)\s*$', s)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
+    for name in ["Sent", "Envoyés", "INBOX.Sent", "Sent Items", "INBOX.Sent Items", "[Gmail]/Sent Mail"]:
+        try:
+            typ, _ = M.select(f'"{name}"')
+            if typ == "OK":
+                return name
+        except Exception:
+            pass
+    return None
+
+
+def save_to_sent(acc, raw_bytes):
+    # Dépose une copie de l'email dans le dossier "Envoyés" de la boîte (IMAP APPEND),
+    # pour qu'il apparaisse dans Mail et serve de preuve d'envoi.
+    try:
+        M = imaplib.IMAP4_SSL(acc.get("server", "imap.ionos.fr"), acc.get("port", 993),
+                              ssl_context=ssl.create_default_context())
+        M.login(acc["email"], acc["password"])
+        folder = find_sent_folder(M)
+        if folder:
+            M.append(f'"{folder}"', "\\Seen", imaplib.Time2Internaldate(time.time()), raw_bytes)
+        try:
+            M.logout()
+        except Exception:
+            pass
+        return folder
+    except Exception as e:
+        print("   ⚠️ copie 'Envoyés' échouée :", e)
+        return None
 
 
 def load_accounts():
@@ -116,6 +158,7 @@ def send_one(acc, mail, sig):
         msg["In-Reply-To"] = ref
         msg["References"] = ref
     msg["Message-ID"] = make_msgid(domain=acc["email"].split("@")[-1])
+    msg["Date"] = formatdate(localtime=True)
 
     # Partie TEXTE (repli universel) : corps + signature texte.
     plain = body + (("\n\n" + text_sig) if text_sig else "")
@@ -154,7 +197,9 @@ def send_one(acc, mail, sig):
     with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
         s.login(acc["email"], acc["password"])
         s.send_message(msg)
-    return True, "ok"
+    # Copie dans "Envoyés" pour que ça apparaisse dans Mail (+ preuve d'envoi).
+    folder = save_to_sent(acc, msg.as_bytes())
+    return True, ("ok, copié dans " + folder if folder else "ok (sans copie Envoyés)")
 
 
 def main():
