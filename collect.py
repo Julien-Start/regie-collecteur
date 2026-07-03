@@ -5,9 +5,54 @@
 # Stdlib uniquement (imaplib/email/json/urllib). Aucun mot de passe ici :
 #   - mdp des boîtes -> comptes.json   (privé, gitignored)
 #   - clé Supabase   -> .env           (privé, gitignored)
-import imaplib, email, json, sys, os, re, ssl, urllib.request
+import imaplib, email, json, sys, os, re, ssl, hashlib, urllib.request, urllib.parse
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
+
+
+def extract_and_upload_pj(env, msg, msgid):
+    # Récupère les pièces jointes d'un mail et les envoie dans le bucket Storage 'mail-pj'.
+    # Renvoie les métadonnées [{nom, type, taille, path}]. Défensif : n'échoue jamais.
+    url = (env.get("SUPABASE_URL") or "").rstrip("/")
+    key = env.get("SUPABASE_SERVICE_KEY") or ""
+    if not url or not key:
+        return []
+    folder = hashlib.md5((msgid or "x").encode("utf-8", "replace")).hexdigest()
+    pjs = []
+    try:
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            disp = (part.get("Content-Disposition") or "").lower()
+            raw_fn = part.get_filename()
+            if "attachment" not in disp and not raw_fn:
+                continue          # partie de corps inline sans fichier -> ignorée
+            if not raw_fn:
+                continue
+            fn = dec(raw_fn)
+            try:
+                data = part.get_payload(decode=True)
+            except Exception:
+                data = None
+            if not data or len(data) > 20 * 1024 * 1024:   # ignore > 20 Mo
+                continue
+            safe = re.sub(r"[^\w.\-]+", "_", fn)[:100] or "fichier"
+            path = f"{folder}/{safe}"
+            ct = part.get_content_type() or "application/octet-stream"
+            try:
+                req = urllib.request.Request(
+                    f"{url}/storage/v1/object/mail-pj/{urllib.parse.quote(path)}",
+                    data=data, method="POST",
+                    headers={"apikey": key, "Authorization": f"Bearer {key}",
+                             "Content-Type": ct, "x-upsert": "true"})
+                with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=60) as r:
+                    if 200 <= r.status < 300:
+                        pjs.append({"nom": fn, "type": ct, "taille": len(data), "path": path})
+            except Exception as e:
+                print("   ⚠️ upload PJ échoué :", fn, e)
+    except Exception as e:
+        print("   ⚠️ extraction PJ échouée :", e)
+    return pjs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PER_BOX = 30  # nb de derniers mails relevés par boîte
@@ -307,7 +352,7 @@ def main():
 
     # Mails déjà connus : préserve tes corrections + évite de reclasser inutilement.
     existing = {}
-    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr"):
+    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr,pieces_jointes"):
         if r.get("message_id"):
             existing[r["message_id"]] = r
     # Tes corrections passées = exemples pour guider Claude.
@@ -361,13 +406,17 @@ def main():
                 if prev:
                     cat = prev.get("categorie") or "autre"   # déjà classé/corrigé -> on garde
                     sug = bool(prev.get("suggestion_suppr"))  # on préserve la suggestion
+                    pj = prev.get("pieces_jointes")          # déjà extraites -> on garde
                 elif is_news:
                     cat = "newsletter"
+                    pj = extract_and_upload_pj(env, msg, msgid)
                 elif api_key:
                     res = claude_classify(api_key, exemples, suppr_ex, addr, sujet, snip)
                     cat, sug = res["categorie"], res["supprimer"]
+                    pj = extract_and_upload_pj(env, msg, msgid)
                 else:
                     cat = categorize_fallback(sujet, snip)
+                    pj = extract_and_upload_pj(env, msg, msgid)
                 rows.append({
                     "compte": label,
                     "boite": acc["email"],
@@ -382,6 +431,7 @@ def main():
                     "suggestion_suppr": sug,
                     "is_newsletter": is_news,
                     "unsubscribe_url": unsubscribe_link(msg.get("List-Unsubscribe")),
+                    "pieces_jointes": pj,
                 })
         finally:
             try:
