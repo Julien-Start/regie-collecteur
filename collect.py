@@ -450,9 +450,9 @@ def main():
                 print(f"  ❌ envoi Supabase échoué : {info}")
 
     # Inscriptions d'un nouveau compte (notifications du site D'clik Agency) : pas de réponse
-    # attendue -> rangées automatiquement en 'client' et marquées 'traité'.
+    # attendue -> rangées automatiquement en 'cavalier' et marquées 'traité'.
     supa_patch(env, "mails?sujet=ilike.*inscription*nouveau*compte*&statut=eq.a_traiter",
-               {"categorie": "client", "is_newsletter": False, "statut": "traite"})
+               {"categorie": "cavalier", "is_newsletter": False, "statut": "traite"})
 
     # Demandes de contact du site = cavaliers À QUI RÉPONDRE -> 'cavalier', à traiter,
     # pas newsletter (l'envoi répondra à l'email du corps, pas au noreply@).
