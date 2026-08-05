@@ -287,9 +287,9 @@ def supa_patch(env, path, payload):
 
 
 def process_deletions(env, accounts):
-    # Supprime (DÉPLACE EN CORBEILLE) les mails que Julien a marqués 'a_supprimer'.
-    # Jamais de suppression définitive : si pas de Corbeille atteignable, on n'efface PAS.
-    to_del = supa_get(env, "mails?statut=eq.a_supprimer&select=id,boite,message_id")
+    # Déplace en Corbeille les mails marqués 'a_supprimer', ET réessaie les 'suppr_echec'
+    # (échecs passés). Jamais de suppression définitive : sans Corbeille atteignable on garde 'suppr_echec'.
+    to_del = supa_get(env, "mails?statut=in.(a_supprimer,suppr_echec)&select=id,boite,message_id")
     if not to_del:
         return
     acc_by_email = {a["email"]: a for a in accounts}
@@ -311,27 +311,36 @@ def process_deletions(env, accounts):
             continue
         for m in mails:
             mid = (m.get("message_id") or "").strip()
-            moved = False
-            if mid.startswith("<"):
-                try:
-                    typ, data = M.search(None, "HEADER", "Message-ID", mid)
-                    ids = data[0].split() if data and data[0] else []
-                    if ids:
-                        for trash in ("Trash", "INBOX.Trash", "Corbeille", "INBOX.Corbeille"):
-                            try:
-                                if all(M.copy(num, trash)[0] == "OK" for num in ids):
-                                    moved = True
-                                    break
-                            except Exception:
-                                continue
-                        if moved:  # uniquement si bien copié en Corbeille
-                            for num in ids:
-                                M.store(num, "+FLAGS", "\\Deleted")
-                            M.expunge()
-                except Exception as e:
-                    print(f"  ⚠️ suppression {mid[:30]} : {e}")
-            supa_patch(env, f"mails?id=eq.{m['id']}", {"statut": "supprime" if moved else "suppr_echec"})
-            total += 1 if moved else 0
+            statut = "suppr_echec"
+            try:
+                ids = []
+                if mid.startswith("<"):
+                    for q in (mid, mid.strip("<>")):  # certains serveurs cherchent sans les chevrons
+                        typ, data = M.search(None, "HEADER", "Message-ID", q)
+                        ids = data[0].split() if data and data[0] else []
+                        if ids:
+                            break
+                if not ids:
+                    statut = "supprime"  # introuvable dans INBOX -> déjà retiré, on ne le réaffiche plus
+                else:
+                    moved = False
+                    for trash in ("Corbeille", "INBOX.Corbeille", "Trash", "INBOX.Trash", "Deleted Messages"):
+                        try:
+                            if all(M.copy(num, trash)[0] == "OK" for num in ids):
+                                moved = True
+                                break
+                        except Exception:
+                            continue
+                    if moved:
+                        for num in ids:
+                            M.store(num, "+FLAGS", "\\Deleted")
+                        M.expunge()
+                        statut = "supprime"
+                    # trouvé mais aucune corbeille n'accepte la copie -> reste 'suppr_echec'
+            except Exception as e:
+                print(f"  ⚠️ suppression {mid[:30]} : {e}")
+            supa_patch(env, f"mails?id=eq.{m['id']}", {"statut": statut})
+            total += 1 if statut == "supprime" else 0
         try:
             M.logout()
         except Exception:
