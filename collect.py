@@ -349,6 +349,51 @@ def process_deletions(env, accounts):
         print(f"🗑️  {total} mail(s) déplacé(s) en Corbeille.")
 
 
+def discord_post(webhook, title, content):
+    # Poste dans le forum Discord (User-Agent obligatoire, Cloudflare bloque sinon ; thread_name requis).
+    if not webhook:
+        return False
+    body = json.dumps({"thread_name": title[:90], "content": content[:1900]}).encode("utf-8")
+    req = urllib.request.Request(webhook, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (LaRegie)"})
+    try:
+        urllib.request.urlopen(req, timeout=20)
+        return True
+    except Exception as e:
+        print("  ⚠️ Discord:", e)
+        return False
+
+
+def check_bank_expiry(env):
+    # Notifie sur Discord quand un consentement bancaire Enable Banking approche des 89 j (ou a expiré).
+    import datetime
+    webhook = os.environ.get("DISCORD_WEBHOOK", "")
+    if not webhook:
+        return
+    rows = supa_get(env, "bank_connexions?source=eq.enablebanking&exp_notifiee=eq.false&select=id,institution_nom,valid_until")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for c in rows or []:
+        vu = c.get("valid_until")
+        if not vu:
+            continue
+        try:
+            d = datetime.datetime.fromisoformat(str(vu).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        days = (d - now).total_seconds() / 86400
+        if days >= 7:
+            continue  # encore loin
+        nom = c.get("institution_nom") or "Banque"
+        if days < 0:
+            title = "⚠️ Banque — consentement EXPIRÉ"
+            msg = f"La connexion **{nom}** a expiré. Ouvre La Régie → Pointage → « + Banque » pour la renouveler."
+        else:
+            title = "⏳ Banque — consentement bientôt expiré"
+            msg = f"La connexion **{nom}** expire le {d.date().isoformat()} (dans {int(days)} j). Renouvelle-la dans La Régie (« + Banque »)."
+        if discord_post(webhook, title, msg):
+            supa_patch(env, f"bank_connexions?id=eq.{c['id']}", {"exp_notifiee": True})
+
+
 def main():
     accounts = load_json("comptes.json")
     if not accounts:
@@ -470,6 +515,9 @@ def main():
 
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
+
+    # Prévient sur Discord si un consentement bancaire arrive à échéance (89 j) ou a expiré.
+    check_bank_expiry(env)
 
     print(f"\n✅ Terminé : {total_push} mails dans la Régie. Ouvre le cockpit, onglet Mails.")
 
