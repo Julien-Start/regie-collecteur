@@ -5,7 +5,7 @@
 # Stdlib uniquement (imaplib/email/json/urllib). Aucun mot de passe ici :
 #   - mdp des boîtes -> comptes.json   (privé, gitignored)
 #   - clé Supabase   -> .env           (privé, gitignored)
-import imaplib, email, json, sys, os, re, ssl, hashlib, urllib.request, urllib.parse
+import imaplib, email, json, sys, os, re, ssl, hashlib, urllib.request, urllib.parse, html as htmlmod
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
 
@@ -146,6 +146,11 @@ def body_text(msg):
             text = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", "replace")
         except Exception:
             text = ""
+        # Mono-part HTML : retirer les balises (sinon aperçu = code HTML brut).
+        if msg.get_content_type() == "text/html":
+            text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.S | re.I)
+            text = re.sub(r"<[^>]+>", " ", text)
+    text = htmlmod.unescape(text)  # &nbsp; &amp; &#39; ... -> caractères lisibles
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n[ \t]*\n\s*", "\n\n", text).strip()
     return clean(text)
