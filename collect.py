@@ -178,6 +178,29 @@ def supa_get(env, path):
         return []
 
 
+def supa_get_all(env, path):
+    # Récupère TOUTES les lignes par pages de 1000 (PostgREST plafonne à 1000 par requête).
+    # Indispensable pour reconnaître un mail déjà en base au-delà de 1000 (sinon il est
+    # re-traité comme neuf et un mail traité peut être ressuscité).
+    url = env.get("SUPABASE_URL", "").rstrip("/")
+    key = env.get("SUPABASE_SERVICE_KEY", "")
+    out, frm = [], 0
+    while True:
+        req = urllib.request.Request(f"{url}/rest/v1/{path}", headers={
+            "apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json",
+            "Range-Unit": "items", "Range": f"{frm}-{frm + 999}"})
+        try:
+            with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=60) as r:
+                page = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            break
+        out.extend(page)
+        if len(page) < 1000:
+            break
+        frm += 1000
+    return out
+
+
 CATEGORIES = (
     "cavalier", "facture", "devis", "client", "partenaire", "fournisseur",
     "admin", "immobilier", "technique", "rdv", "alcove", "perso", "spam", "autre",
@@ -411,7 +434,7 @@ def main():
 
     # Mails déjà connus : préserve tes corrections + évite de reclasser inutilement.
     existing = {}
-    for r in supa_get(env, "mails?select=message_id,categorie,corrige,suggestion_suppr,pieces_jointes,is_newsletter"):
+    for r in supa_get_all(env, "mails?select=message_id,categorie,corrige,suggestion_suppr,pieces_jointes,is_newsletter&order=id.asc"):
         if r.get("message_id"):
             existing[r["message_id"]] = r
     # Tes corrections passées = exemples pour guider Claude.
@@ -515,7 +538,7 @@ def main():
 
     # Demandes de contact du site = cavaliers À QUI RÉPONDRE -> 'cavalier', à traiter,
     # pas newsletter (l'envoi répondra à l'email du corps, pas au noreply@).
-    supa_patch(env, "mails?sujet=ilike.*demande*contact*&is_newsletter=eq.true",
+    supa_patch(env, "mails?sujet=ilike.*demande*contact*&is_newsletter=eq.true&statut=not.in.(traite,supprime,archive,a_supprimer,suppr_echec)",
                {"categorie": "cavalier", "is_newsletter": False, "statut": "a_traiter"})
 
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
