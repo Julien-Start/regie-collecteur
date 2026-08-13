@@ -7,7 +7,7 @@
 # Envoi en multipart : texte simple + HTML (avec logo embarqué en CID si la boîte
 # en a un). Stdlib uniquement. Mots de passe : COMPTES_JSON (secret).
 
-import os, re, json, smtplib, ssl, imaplib, time, urllib.request, urllib.error
+import os, re, json, smtplib, ssl, imaplib, time, base64, urllib.request, urllib.error
 import html as htmllib
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, formatdate
@@ -202,12 +202,53 @@ def send_one(acc, mail, sig):
     return True, ("ok, copié dans " + folder if folder else "ok (sans copie Envoyés)")
 
 
+# File d'attente « envoi facture au comptable » (Dext) : PDF en base64 -> email en pièce jointe.
+def send_compta(e, accounts):
+    try:
+        rows = supa_get(e, "envois_compta?statut=eq.a_envoyer&select=id,numero,destinataire,pdf_b64")
+    except Exception as ex:
+        print("   ⚠️ file compta illisible :", ex); return
+    if not rows:
+        return
+    acc = next((a for a in accounts if a.get("password")), None)
+    if not acc:
+        print("   ⏭️  compta : aucune boîte avec mot de passe."); return
+    print(f"🧾 {len(rows)} facture(s) à envoyer au comptable.")
+    for r in rows:
+        dest = (r.get("destinataire") or "").strip()
+        b64 = r.get("pdf_b64") or ""
+        if not dest or not b64:
+            supa_write(e, f"envois_compta?id=eq.{r['id']}", {"statut": "echec", "erreur": "destinataire ou PDF vide"}); continue
+        try:
+            pdf = base64.b64decode(b64)
+            num = (r.get("numero") or "doc")
+            msg = EmailMessage()
+            msg["From"] = formataddr((acc.get("label") or "", acc["email"]))
+            msg["To"] = dest
+            msg["Subject"] = f"Facture {num}".strip()
+            msg["Message-ID"] = make_msgid(domain=acc["email"].split("@")[-1])
+            msg["Date"] = formatdate(localtime=True)
+            msg.set_content(f"Facture {num} en pièce jointe (envoi automatique La Régie).")
+            fname = ("Facture-" + str(num) + ".pdf").replace("/", "-").replace("\\", "-")
+            msg.add_attachment(pdf, maintype="application", subtype="pdf", filename=fname)
+            host = smtp_host(acc.get("server"))
+            with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
+                s.login(acc["email"], acc["password"])
+                s.send_message(msg)
+            supa_write(e, f"envois_compta?id=eq.{r['id']}", {"statut": "envoye", "pdf_b64": None, "erreur": None})
+            print(f"   ✅ facture {num} -> {dest}")
+        except Exception as ex:
+            supa_write(e, f"envois_compta?id=eq.{r['id']}", {"statut": "echec", "erreur": str(ex)[:300]})
+            print(f"   ❌ compta {r['id']} : {ex}")
+
+
 def main():
     e = env_supa()
     if not e["url"] or not e["key"]:
         print("❌ SUPABASE_URL / SUPABASE_SERVICE_KEY absents.")
         return
     accounts = load_accounts()
+    send_compta(e, accounts)  # envoie d'abord les factures en file pour le comptable
     acc_by_email = {a["email"]: a for a in accounts}
     acc_by_label = {a.get("label", a["email"]): a for a in accounts}
 
