@@ -210,7 +210,10 @@ def send_compta(e, accounts):
         print("   ⚠️ file compta illisible :", ex); return
     if not rows:
         return
-    acc = next((a for a in accounts if a.get("password")), None)
+    # Expéditeur fixé : j.rouyer@dclik-agency.com (repli : 1re boîte avec mot de passe).
+    SENDER = "j.rouyer@dclik-agency.com"
+    acc = next((a for a in accounts if a.get("email") == SENDER and a.get("password")), None) \
+        or next((a for a in accounts if a.get("password")), None)
     if not acc:
         print("   ⏭️  compta : aucune boîte avec mot de passe."); return
     print(f"🧾 {len(rows)} facture(s) à envoyer au comptable.")
