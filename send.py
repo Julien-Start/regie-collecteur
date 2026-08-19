@@ -7,7 +7,7 @@
 # Envoi en multipart : texte simple + HTML (avec logo embarqué en CID si la boîte
 # en a un). Stdlib uniquement. Mots de passe : COMPTES_JSON (secret).
 
-import os, re, json, smtplib, ssl, imaplib, time, base64, urllib.request, urllib.error
+import os, re, json, smtplib, ssl, imaplib, time, base64, urllib.request, urllib.error, urllib.parse
 import html as htmllib
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, formatdate
@@ -245,13 +245,79 @@ def send_compta(e, accounts):
             print(f"   ❌ compta {r['id']} : {ex}")
 
 
+def storage_download(e, bucket, path):
+    if not path:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"{e['url']}/storage/v1/object/{bucket}/{urllib.parse.quote(path)}",
+            headers={"apikey": e["key"], "Authorization": f"Bearer {e['key']}"})
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=60) as r:
+            return r.read()
+    except Exception as ex:
+        print("   ⚠️ download PJ échoué :", path, ex)
+        return None
+
+
+# Factures REÇUES par mail (classées) : transfère les PDF joints au comptable (Dext, boîte achats).
+def send_compta_mails(e, accounts):
+    try:
+        rows = supa_get(e, "mails?compta_demande=eq.true&compta_envoye=eq.false"
+                           "&select=id,sujet,from_addr,pieces_jointes")
+    except Exception as ex:
+        print("   ⚠️ file compta-mails illisible :", ex); return
+    if not rows:
+        return
+    DEST = "d.click.submitter.d.click@dext.cc"
+    SENDER = "j.rouyer@dclik-agency.com"
+    acc = next((a for a in accounts if a.get("email") == SENDER and a.get("password")), None) \
+        or next((a for a in accounts if a.get("password")), None)
+    if not acc:
+        print("   ⏭️  compta-mails : aucune boîte avec mot de passe."); return
+    print(f"🧾 {len(rows)} mail(s)-facture à transférer au comptable.")
+    for m in rows:
+        pjs = m.get("pieces_jointes") or []
+        pdfs = [p for p in pjs if str(p.get("nom", "")).lower().endswith(".pdf") or "pdf" in str(p.get("type", "")).lower()]
+        if not pdfs:
+            supa_write(e, f"mails?id=eq.{m['id']}", {"compta_demande": False, "compta_envoye": True}); continue
+        try:
+            msg = EmailMessage()
+            msg["From"] = formataddr((acc.get("label") or "", acc["email"]))
+            msg["To"] = DEST
+            msg["Subject"] = "Facture reçue : " + (m.get("sujet") or "")[:120]
+            msg["Message-ID"] = make_msgid(domain=acc["email"].split("@")[-1])
+            msg["Date"] = formatdate(localtime=True)
+            msg.set_content("Facture(s) en pièce jointe, transférée(s) via La Régie.\n"
+                            "Expéditeur d'origine : " + (m.get("from_addr") or ""))
+            n = 0
+            for p in pdfs:
+                data = storage_download(e, "mail-pj", p.get("path"))
+                if not data:
+                    continue
+                msg.add_attachment(data, maintype="application", subtype="pdf", filename=(p.get("nom") or "facture.pdf"))
+                n += 1
+            if not n:
+                supa_write(e, f"mails?id=eq.{m['id']}", {"compta_demande": False})
+                print(f"   ⏭️  mail {m['id']} : PJ inaccessibles."); continue
+            host = smtp_host(acc.get("server"))
+            with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
+                s.login(acc["email"], acc["password"])
+                s.send_message(msg)
+            supa_write(e, f"mails?id=eq.{m['id']}", {"compta_demande": False, "compta_envoye": True})
+            print(f"   ✅ mail {m['id']} -> comptable ({n} PDF)")
+        except Exception as ex:
+            supa_write(e, f"mails?id=eq.{m['id']}", {"compta_demande": False})
+            print(f"   ❌ compta-mail {m['id']} : {ex}")
+
+
 def main():
     e = env_supa()
     if not e["url"] or not e["key"]:
         print("❌ SUPABASE_URL / SUPABASE_SERVICE_KEY absents.")
         return
     accounts = load_accounts()
-    send_compta(e, accounts)  # envoie d'abord les factures en file pour le comptable
+    send_compta(e, accounts)         # factures de VENTE (PDF base64) -> Dext ventes
+    send_compta_mails(e, accounts)   # factures REÇUES par mail (PDF joints) -> Dext achats
     acc_by_email = {a["email"]: a for a in accounts}
     acc_by_label = {a.get("label", a["email"]): a for a in accounts}
 
