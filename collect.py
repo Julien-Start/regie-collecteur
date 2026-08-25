@@ -203,7 +203,7 @@ def supa_get_all(env, path):
 
 CATEGORIES = (
     "cavalier", "facture", "devis", "client", "partenaire", "fournisseur",
-    "admin", "immobilier", "technique", "rdv", "alcove", "perso", "spam", "autre",
+    "admin", "immobilier", "technique", "rdv", "alcove", "paddockroom", "perso", "spam", "autre",
 )
 
 
@@ -540,6 +540,10 @@ def main():
     # pas newsletter (l'envoi répondra à l'email du corps, pas au noreply@).
     supa_patch(env, "mails?sujet=ilike.*demande*contact*&is_newsletter=eq.true&statut=not.in.(traite,supprime,archive,a_supprimer,suppr_echec)",
                {"categorie": "cavalier", "is_newsletter": False, "statut": "a_traiter"})
+
+    # Notifications Stripe "en faveur de Paddockroom" -> catégorie 'paddockroom'.
+    supa_patch(env, "mails?sujet=ilike.*en%20faveur%20de%20Paddockroom*&categorie=neq.paddockroom",
+               {"categorie": "paddockroom", "is_newsletter": False})
 
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
