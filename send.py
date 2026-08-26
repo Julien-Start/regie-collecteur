@@ -8,6 +8,7 @@
 # en a un). Stdlib uniquement. Mots de passe : COMPTES_JSON (secret).
 
 import os, re, json, smtplib, ssl, imaplib, time, base64, urllib.request, urllib.error, urllib.parse
+from datetime import datetime, timezone
 import html as htmllib
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, formatdate
@@ -133,11 +134,10 @@ def htmlify(text):
     return esc.replace("\n", "<br>\n")
 
 
-def send_one(acc, mail, sig):
-    dest = (vrai_destinataire(mail.get("from_addr"), mail.get("corps")) or "").strip()
-    body = (mail.get("brouillon") or "").strip()
-    if not dest or not body:
-        return False, "destinataire ou brouillon vide"
+def build_message(acc, dest, subject, body, sig, in_reply_to=None):
+    """Monte un message texte + HTML avec la signature de la boîte (images CID
+    comprises). Partagé par les RÉPONSES (send_one) et les envois NOUVEAUX
+    (send_envois_mail : relances de loyer, courriers SCI)."""
     sig = sig or {}
     text_sig = (sig.get("texte") or "").strip()
     html_sig = (sig.get("html") or "").strip()
@@ -152,8 +152,8 @@ def send_one(acc, mail, sig):
     msg = EmailMessage()
     msg["From"] = formataddr((acc.get("label") or "", acc["email"]))
     msg["To"] = dest
-    msg["Subject"] = re_subject(mail.get("sujet"))
-    ref = (mail.get("message_id") or "").strip()
+    msg["Subject"] = subject
+    ref = (in_reply_to or "").strip()
     if ref:
         msg["In-Reply-To"] = ref
         msg["References"] = ref
@@ -193,13 +193,79 @@ def send_one(acc, mail, sig):
         with open(lp_legacy, "rb") as fh:
             html_part.add_related(fh.read(), maintype="image", subtype="png", cid=legacy_cid)
 
+    return msg
+
+
+def expedier(acc, msg):
+    """Envoie et dépose une copie dans Envoyés (preuve d'envoi visible dans Mail)."""
     host = smtp_host(acc.get("server"))
     with smtplib.SMTP_SSL(host, 465, context=ssl.create_default_context(), timeout=30) as s:
         s.login(acc["email"], acc["password"])
         s.send_message(msg)
-    # Copie dans "Envoyés" pour que ça apparaisse dans Mail (+ preuve d'envoi).
     folder = save_to_sent(acc, msg.as_bytes())
     return True, ("ok, copié dans " + folder if folder else "ok (sans copie Envoyés)")
+
+
+def send_one(acc, mail, sig):
+    dest = (vrai_destinataire(mail.get("from_addr"), mail.get("corps")) or "").strip()
+    body = (mail.get("brouillon") or "").strip()
+    if not dest or not body:
+        return False, "destinataire ou brouillon vide"
+    msg = build_message(acc, dest, re_subject(mail.get("sujet")), body, sig,
+                        in_reply_to=mail.get("message_id"))
+    return expedier(acc, msg)
+
+
+def resoudre_compte(cle, accounts):
+    """La file d'envoi désigne la boîte par son email OU son libellé (« SCI »).
+    On tolère la casse et les libellés partiels pour éviter les envois perdus."""
+    cle = (cle or "").strip()
+    if not cle:
+        return None
+    for a in accounts:
+        if a.get("email") == cle:
+            return a
+    for a in accounts:
+        if (a.get("label") or "") == cle:
+            return a
+    bas = cle.lower()
+    for a in accounts:
+        if (a.get("label") or "").lower() == bas or bas in (a.get("label") or "").lower():
+            return a
+    return None
+
+
+def send_envois_mail(e, accounts, sigs):
+    """File d'envoi générique alimentée par le cockpit et le MCP.
+    Sert aujourd'hui aux RELANCES DE LOYER. Rien n'arrive ici tout seul : une
+    ligne n'existe que si Julien a cliqué « Mettre en file d'envoi »."""
+    try:
+        rows = supa_get(e, "envois_mail?statut=eq.a_envoyer&select=id,compte,destinataire,sujet,corps,contexte")
+    except Exception as ex:
+        print("   ⚠️ file d'envoi illisible :", ex); return
+    if not rows:
+        return
+    print(f"📮 {len(rows)} envoi(s) en file.")
+    for r in rows:
+        acc = resoudre_compte(r.get("compte"), accounts)
+        if not acc or not acc.get("password"):
+            supa_write(e, f"envois_mail?id=eq.{r['id']}",
+                       {"statut": "echec", "erreur": f"boîte introuvable : {r.get('compte')}"})
+            print(f"   ⏭️  envoi {r['id']} : boîte « {r.get('compte')} » introuvable."); continue
+        dest = (r.get("destinataire") or "").strip()
+        corps = (r.get("corps") or "").strip()
+        if not dest or not corps:
+            supa_write(e, f"envois_mail?id=eq.{r['id']}", {"statut": "echec", "erreur": "destinataire ou corps vide"}); continue
+        try:
+            msg = build_message(acc, dest, (r.get("sujet") or "").strip() or "(sans objet)",
+                                corps, sigs.get(acc.get("email")) or sigs.get(r.get("compte")))
+            expedier(acc, msg)
+            supa_write(e, f"envois_mail?id=eq.{r['id']}",
+                       {"statut": "envoye", "erreur": None, "envoye_at": datetime.now(timezone.utc).isoformat()})
+            print(f"   ✅ {r.get('contexte') or 'envoi'} -> {dest}")
+        except Exception as ex:
+            supa_write(e, f"envois_mail?id=eq.{r['id']}", {"statut": "echec", "erreur": str(ex)[:300]})
+            print(f"   ❌ envoi {r['id']} : {ex}")
 
 
 # File d'attente « envoi facture au comptable » (Dext) : PDF en base64 -> email en pièce jointe.
@@ -328,6 +394,8 @@ def main():
             sigs[s["compte"]] = s
     except Exception:
         pass
+
+    send_envois_mail(e, accounts, sigs)   # file générique : relances de loyer, courriers SCI
 
     pending = supa_get(e, "mails?envoi_demande=eq.true&repondu=eq.false"
                           "&select=id,compte,boite,from_addr,message_id,sujet,brouillon,categorie,corps")
