@@ -427,6 +427,49 @@ def supa_delete(env, path):
         return False
 
 
+_GUILD = None
+
+
+def guild_discord(env, hub_url, hub_key):
+    # L'identifiant du serveur Discord sert à bâtir le lien vers le fil.
+    # Plutôt que d'en faire un secret de plus à poser (et à oublier), on le
+    # demande au hub : un webhook Discord répond son `guild_id` sur un simple
+    # GET de son URL. On ne poste rien, on lit une fiche d'identité.
+    # DISCORD_GUILD_ID, s'il est posé, reste prioritaire.
+    global _GUILD
+    if _GUILD is not None:
+        return _GUILD
+    fixe = (env.get("DISCORD_GUILD_ID") or "").strip()
+    if fixe:
+        _GUILD = fixe
+        return _GUILD
+    _GUILD = ""
+    try:
+        req = urllib.request.Request(
+            f"{hub_url}/rest/v1/app_keys?select=discord_webhook_url&limit=5",
+            headers={"apikey": hub_key, "Authorization": f"Bearer {hub_key}",
+                     "Accept": "application/json"})
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=20) as r:
+            lignes = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return _GUILD
+    for l in lignes or []:
+        # Les webhooks les plus anciens portent encore le domaine discordapp.com.
+        wh = (l.get("discord_webhook_url") or "").replace("discordapp.com", "discord.com")
+        if "/api/webhooks/" not in wh:
+            continue
+        try:
+            req = urllib.request.Request(wh, headers={"User-Agent": "regie-collecteur"})
+            with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=15) as r:
+                g = json.loads(r.read().decode("utf-8")).get("guild_id")
+            if g:
+                _GUILD = str(g)
+                return _GUILD
+        except Exception:
+            continue
+    return _GUILD
+
+
 def feedback_automatique(item):
     # Le hub ne contient pas que des gens. L'Alcôve y publie sa surveillance :
     # 71 « Heartbeat » et une dizaine de « [SYSTEM · cron-health-check] », tous
@@ -467,7 +510,7 @@ def sync_feedback_hub(env):
         print("   ⚠️ Feedback Hub injoignable :", e)
         return
 
-    guild = env.get("DISCORD_GUILD_ID") or ""
+    guild = guild_discord(env, hub_url, hub_key)
     # Par défaut on ne reprend que les messages écrits par des gens. Mettre
     # HUB_INCLURE_SYSTEME=1 pour faire remonter aussi la surveillance.
     tout = (env.get("HUB_INCLURE_SYSTEME") or "").strip() in ("1", "oui", "true")
