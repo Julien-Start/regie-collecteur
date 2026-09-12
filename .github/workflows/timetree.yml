@@ -1,0 +1,55 @@
+name: Saison TimeTree
+
+# La saison des concours vit dans TimeTree (calendrier « D'clik agency »).
+# TimeTree n'a pas d'export officiel : on utilise l'outil communautaire
+# timetree-exporter (MIT, API non officielles), UNE fois par jour pour rester
+# sobre, puis timetree_sync.py range les concours dans La Régie.
+# Sans les secrets TIMETREE_*, le workflow ne fait rien et se termine sans erreur.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"      # 4 h 17 UTC, une fois par jour (GitHub peut décaler)
+  workflow_dispatch: {}
+
+concurrency:
+  group: saison-timetree
+  cancel-in-progress: false
+
+jobs:
+  saison:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"     # timetree-exporter demande Python 3.10 ou plus
+
+      - name: Lire TimeTree et ranger les concours
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_CALENDAR_CODE: ${{ secrets.TIMETREE_CALENDAR_CODE }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ] || [ -z "$TIMETREE_CALENDAR_CODE" ]; then
+            echo "Secrets TimeTree absents : rien à synchroniser."
+            exit 0
+          fi
+          python -m pip install --quiet timetree-exporter
+          python -m pip show timetree-exporter | grep -i '^version' || true
+          # L'export ne doit jamais faire échouer le passage : un échec est noté
+          # dans La Régie, qui le signale dans le radar au bout de trois jours.
+          if timetree-exporter -c "$TIMETREE_CALENDAR_CODE" -o saison.ics > export.log 2>&1 && [ -s saison.ics ]; then
+            python timetree_sync.py saison.ics
+          else
+            MSG="Export TimeTree en échec : $(tail -n 3 export.log | tr '\n' ' ' | cut -c1-300)"
+            # Ce message part en base et s'affiche dans le radar, où GitHub ne masque rien :
+            # on retire l'identifiant et le mot de passe s'ils y apparaissaient.
+            MSG="${MSG//"$TIMETREE_PASSWORD"/***}"
+            MSG="${MSG//"$TIMETREE_EMAIL"/***}"
+            echo "$MSG"
+            python timetree_sync.py --echec "$MSG"
+          fi
+          rm -f saison.ics export.log
