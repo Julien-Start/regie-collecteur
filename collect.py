@@ -104,7 +104,9 @@ def load_env():
                     env[k.strip()] = v.strip()
             break
     # Hébergé : les variables d'environnement priment (secrets GitHub, etc.).
-    for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "ANTHROPIC_API_KEY"):
+    for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "ANTHROPIC_API_KEY",
+              "HUB_SUPABASE_URL", "HUB_SUPABASE_SERVICE_KEY", "DISCORD_GUILD_ID",
+              "HUB_INCLURE_SYSTEME"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return env
@@ -392,6 +394,125 @@ def discord_post(webhook, title, content):
         return False
 
 
+def supa_write(env, table, rows, on_conflict):
+    # Upsert générique (supa_upsert ne sait parler qu'à la table `mails`).
+    url = env.get("SUPABASE_URL", "").rstrip("/")
+    key = env.get("SUPABASE_SERVICE_KEY", "")
+    if not url or not key or not rows:
+        return False, "rien à écrire"
+    req = urllib.request.Request(
+        f"{url}/rest/v1/{table}?on_conflict={on_conflict}",
+        data=json.dumps(rows).encode("utf-8"), method="POST",
+        headers={"apikey": key, "Authorization": f"Bearer {key}",
+                 "Content-Type": "application/json",
+                 "Prefer": "resolution=merge-duplicates,return=minimal"})
+    try:
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
+            return (200 <= r.status < 300), f"HTTP {r.status}"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}: {e.read().decode('utf-8','replace')[:300]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def supa_delete(env, path):
+    url = env.get("SUPABASE_URL", "").rstrip("/")
+    key = env.get("SUPABASE_SERVICE_KEY", "")
+    req = urllib.request.Request(f"{url}/rest/v1/{path}", method="DELETE", headers={
+        "apikey": key, "Authorization": f"Bearer {key}", "Prefer": "return=minimal"})
+    try:
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
+def feedback_automatique(item):
+    # Le hub ne contient pas que des gens. L'Alcôve y publie sa surveillance :
+    # 71 « Heartbeat » et une dizaine de « [SYSTEM · cron-health-check] », tous
+    # en statut « nouveau » et jamais traités, parce qu'ils n'ont pas à l'être.
+    # Les faire remonter noierait le radar sous 80 lignes de machine, et ce que
+    # ce chantier doit montrer, ce sont les messages des gens.
+    # Convention du hub : auteur « System · <app> », ou titre « [SYSTEM · … ] ».
+    auteur = (item.get("user_name") or "")
+    titre = (item.get("title") or "")
+    return (auteur.strip().lower().startswith("system")
+            or titre.lstrip().upper().startswith("[SYSTEM")
+            or "heartbeat" in titre.lower())
+
+
+def sync_feedback_hub(env):
+    # LE DISCORD ENTRANT — lecture seule du Feedback Hub.
+    # Les signalements des apps clientes (Paddock Room, L'Alcôve, les suivantes)
+    # vivent déjà dans la base du hub. On recopie ici ceux qui ne sont PAS traités,
+    # et le radar les fait remonter avec leur activité. Julien continue de répondre
+    # dans Discord : quand il y marque le signalement fait ou rejeté, le hub change
+    # de statut et la ligne disparaît d'elle-même au passage suivant.
+    # On n'écrit jamais dans le hub. On ne parle jamais à Discord.
+    hub_url = (env.get("HUB_SUPABASE_URL") or "").rstrip("/")
+    hub_key = env.get("HUB_SUPABASE_SERVICE_KEY") or ""
+    if not hub_url or not hub_key:
+        return  # non configuré : on passe, sans bruit
+
+    champs = ("id,app_key,type,title,message,user_name,user_email,page_source,"
+              "status,discord_thread_id,discord_message_id,created_at,updated_at")
+    chemin = (f"feedback_items?status=in.(nouveau,vu,prevu,en_cours)"
+              f"&select={champs}&order=created_at.desc&limit=200")
+    try:
+        req = urllib.request.Request(f"{hub_url}/rest/v1/{chemin}", headers={
+            "apikey": hub_key, "Authorization": f"Bearer {hub_key}", "Accept": "application/json"})
+        with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
+            items = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print("   ⚠️ Feedback Hub injoignable :", e)
+        return
+
+    guild = env.get("DISCORD_GUILD_ID") or ""
+    # Par défaut on ne reprend que les messages écrits par des gens. Mettre
+    # HUB_INCLURE_SYSTEME=1 pour faire remonter aussi la surveillance.
+    tout = (env.get("HUB_INCLURE_SYSTEME") or "").strip() in ("1", "oui", "true")
+    rows, ecartes = [], 0
+    for it in items or []:
+        if not tout and feedback_automatique(it):
+            ecartes += 1
+            continue
+        fil = it.get("discord_thread_id")
+        rows.append({
+            "id": it.get("id"),
+            "app_key": it.get("app_key"),
+            "type": it.get("type"),
+            "titre": clean(it.get("title") or ""),
+            "message": clean(it.get("message") or ""),
+            "auteur": clean(it.get("user_name") or ""),
+            "email": it.get("user_email"),
+            "page_source": it.get("page_source"),
+            "statut": it.get("status"),
+            "discord_thread_id": fil,
+            "discord_message_id": it.get("discord_message_id"),
+            "lien_discord": (f"https://discord.com/channels/{guild}/{fil}" if (guild and fil) else None),
+            "cree_le": it.get("created_at"),
+            "maj_le": it.get("updated_at"),
+        })
+
+    if rows:
+        ok, detail = supa_write(env, "feedbacks", rows, "id")
+        if not ok:
+            print("   ⚠️ écriture des signalements échouée :", detail)
+            return
+
+    # Ce qui n'est plus ouvert côté hub (traité, rejeté, supprimé) quitte le miroir.
+    ids = [r["id"] for r in rows if r.get("id")]
+    if ids:
+        liste = ",".join('"%s"' % i for i in ids)
+        supa_delete(env, f"feedbacks?id=not.in.({liste})")
+    else:
+        supa_delete(env, "feedbacks?id=not.is.null")
+
+    if rows or ecartes:
+        detail = f" ({ecartes} message(s) de surveillance écartés)" if ecartes else ""
+        print(f"   💬 {len(rows)} signalement(s) non traité(s) repris du Feedback Hub{detail}")
+
+
 def check_bank_expiry(env):
     # Notifie sur Discord quand un consentement bancaire Enable Banking approche des 89 j (ou a expiré).
     import datetime
@@ -547,6 +668,9 @@ def main():
 
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
+
+    # Reprend du Feedback Hub les signalements non traités (le Discord entrant).
+    sync_feedback_hub(env)
 
     # Prévient sur Discord si un consentement bancaire arrive à échéance (89 j) ou a expiré.
     check_bank_expiry(env)

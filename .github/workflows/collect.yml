@@ -20,4 +20,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Le Discord entrant : lecture seule du Feedback Hub (autre projet Supabase).
+          # Absents, la synchronisation est simplement sautée, sans erreur.
+          HUB_SUPABASE_URL: ${{ secrets.HUB_SUPABASE_URL }}
+          HUB_SUPABASE_SERVICE_KEY: ${{ secrets.HUB_SUPABASE_SERVICE_KEY }}
+          DISCORD_GUILD_ID: ${{ secrets.DISCORD_GUILD_ID }}
+          HUB_INCLURE_SYSTEME: ${{ vars.HUB_INCLURE_SYSTEME }}
         run: python3 collect.py
