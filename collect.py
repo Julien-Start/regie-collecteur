@@ -484,6 +484,33 @@ def feedback_automatique(item):
             or "heartbeat" in titre.lower())
 
 
+def transmettre_clotures(env, hub_url, hub_key):
+    # Julien a cliqué « Fait » sur un signalement dans le radar : la Régie a posé
+    # `clos_le`. On passe le signalement à « fait » DANS LE HUB, ce qui le clôt
+    # aussi pour la personne qui l'a écrit. C'est la seule écriture que la Régie
+    # fait jamais dans le hub, et elle ne part que d'un clic de Julien.
+    # En cas d'échec, `clos_le` reste posé : on réessaie au passage suivant.
+    a_clore = supa_get(env, "feedbacks?clos_le=not.is.null&select=id")
+    clos = 0
+    for f in a_clore or []:
+        fid = f.get("id")
+        if not fid:
+            continue
+        req = urllib.request.Request(
+            f"{hub_url}/rest/v1/feedback_items?id=eq.{fid}&status=neq.fait",
+            data=json.dumps({"status": "fait"}).encode("utf-8"), method="PATCH",
+            headers={"apikey": hub_key, "Authorization": f"Bearer {hub_key}",
+                     "Content-Type": "application/json", "Prefer": "return=minimal"})
+        try:
+            with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=20) as r:
+                if 200 <= r.status < 300:
+                    clos += 1
+        except Exception as e:
+            print("   ⚠️ clôture non transmise au hub :", fid, e)
+    if clos:
+        print(f"   ✔ {clos} signalement(s) clos dans le Feedback Hub")
+
+
 def sync_feedback_hub(env):
     # LE DISCORD ENTRANT — lecture seule du Feedback Hub.
     # Les signalements des apps clientes (Paddock Room, L'Alcôve, les suivantes)
@@ -491,11 +518,14 @@ def sync_feedback_hub(env):
     # et le radar les fait remonter avec leur activité. Julien continue de répondre
     # dans Discord : quand il y marque le signalement fait ou rejeté, le hub change
     # de statut et la ligne disparaît d'elle-même au passage suivant.
-    # On n'écrit jamais dans le hub. On ne parle jamais à Discord.
+    # La seule écriture dans le hub est la clôture décidée par Julien (voir
+    # transmettre_clotures). On ne parle jamais à Discord.
     hub_url = (env.get("HUB_SUPABASE_URL") or "").rstrip("/")
     hub_key = env.get("HUB_SUPABASE_SERVICE_KEY") or ""
     if not hub_url or not hub_key:
         return  # non configuré : on passe, sans bruit
+
+    transmettre_clotures(env, hub_url, hub_key)
 
     champs = ("id,app_key,type,title,message,user_name,user_email,page_source,"
               "status,discord_thread_id,discord_message_id,created_at,updated_at")
