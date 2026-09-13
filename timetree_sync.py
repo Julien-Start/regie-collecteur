@@ -6,7 +6,9 @@
 # agency » dans un fichier .ics ; ce script le lit et range les concours dans la
 # table `evenements`.
 #
-#   python3 timetree_sync.py saison.ics            synchronise
+#   python3 timetree_sync.py dossier/              synchronise un export multi-calendriers
+#                                                  (index.json : concours + personnes)
+#   python3 timetree_sync.py saison.ics            synchronise le seul calendrier des concours
 #   python3 timetree_sync.py saison.ics --essai    montre ce qu'il ferait, n'écrit rien
 #   python3 timetree_sync.py --echec "message"     note un échec de l'export (radar)
 #
@@ -25,6 +27,14 @@ import sys, os, re, json, ssl, hashlib, unicodedata, urllib.request, urllib.pars
 from datetime import date, datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Les journaux de GitHub Actions d'un dépôt public sont lisibles par tous :
+# en CI on n'écrit que des nombres, jamais un titre, un lieu ou un client.
+EN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def detail(texte):
+    if not EN_CI:
+        print(texte)
 FENETRE_PASSE = 1      # jours : le concours en cours reste visible
 FENETRE_AVENIR = 548   # jours : un an et demi de saison
 
@@ -165,7 +175,8 @@ def concours_de_l_agenda(texte, aujourd_hui):
             continue
         uid = ev.get("UID", ({}, ""))[1].strip() or hashlib.sha1((titre + debut.isoformat()).encode()).hexdigest()
         cats = [normaliser(c) for c in _valeur(ev.get("CATEGORIES", ({}, ""))[1]).split(",") if c.strip()]
-        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats})
+        lieu = _valeur(ev.get("LOCATION", ({}, ""))[1]).strip()
+        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "location": lieu})
     return retenus, ecartes
 
 
@@ -188,6 +199,8 @@ def est_shf(c):
 
 
 def lieu_de(c):
+    if c.get("location"):                        # lieu saisi dans TimeTree : il fait foi
+        return c["location"]
     if est_shf(c):
         return re.sub(r"^\s*shf\s*[-:·]?\s*", "", c["titre"], flags=re.I).strip() or c["titre"]
     return c["titre"]
@@ -283,18 +296,19 @@ def synchroniser(env, texte, essai):
     for n in nouveaux:
         qui = clients.get(n["client_id"], "client à préciser")
         origine = " (appris)" if n.get("_appris") else (" (deviné)" if n["client_devine"] else "")
-        print("  + %s → %s  %-24s lieu : %-18s client : %s%s" % (n["date_debut"], n["date_fin"], n["titre"][:24],
-                                                               (n["lieu"] or "")[:18], qui, origine))
+        detail("  + %s → %s  %-24s lieu : %-18s client : %s%s" % (n["date_debut"], n["date_fin"], n["titre"][:24],
+                                                                (n["lieu"] or "")[:18], qui, origine))
     for eid, p in modifs:
-        print("  ~ événement %s : %s" % (eid, ", ".join(sorted(p))))
+        detail("  ~ événement %s : %s" % (eid, ", ".join(sorted(p))))
     for ex in retires:
-        print("  - %s %s : n'est plus dans l'agenda (marqué, pas supprimé)" % (ex.get("date_debut"), ex.get("titre_agenda")))
+        detail("  - %s %s : n'est plus dans l'agenda (marqué, pas supprimé)" % (ex.get("date_debut"), ex.get("titre_agenda")))
+    print("  %d ajouté(s), %d mis à jour, %d retiré(s) de l'agenda" % (len(nouveaux), len(modifs), len(retires)))
     if ecartes:
-        print("  écartés (rendez-vous à heure fixe ou sans date) : %s" % ", ".join(sorted(set(ecartes))[:10]))
+        detail("  écartés (rendez-vous à heure fixe ou sans date) : %s" % ", ".join(sorted(set(ecartes))[:10]))
 
     if essai:
         print("Essai : rien n'a été écrit.")
-        return
+        return len(concours), None
     if nouveaux:
         for n in nouveaux:
             n.pop("_appris", None)
@@ -303,9 +317,91 @@ def synchroniser(env, texte, essai):
         requete(env, "PATCH", "evenements?id=eq.%s" % eid, p, prefer="return=minimal")
     for ex in retires:
         requete(env, "PATCH", "evenements?id=eq.%s" % ex["id"], {"retire_agenda_le": maintenant}, prefer="return=minimal")
-    noter_synchro(env, True, "%d concours lus, %d ajoutés, %d mis à jour, %d retirés de l'agenda"
-                  % (len(concours), len(nouveaux), len(modifs), len(retires)), nb=len(concours))
-    print("Synchronisé.")
+    return len(concours), "%d concours lus, %d ajoutés, %d mis à jour, %d retirés de l'agenda" % (
+        len(concours), len(nouveaux), len(modifs), len(retires))
+
+
+# --------------------------------------------------------------------------- #
+# Qui va sur quel concours                                                     #
+# --------------------------------------------------------------------------- #
+
+def mots_lieu(texte):
+    return {m for m in normaliser(texte).split()
+            if len(m) >= 4 and m not in MOTS_VIDES and m not in ROMAINS and not m.isdigit()}
+
+
+def rapprocher(p, evenements, clients, stricte):
+    """Le concours connu qui correspond à un événement du calendrier d'une personne.
+    Il faut que les dates se chevauchent ET que le titre nomme le lieu, le client ou
+    le concours. Pour un salarié, des dates strictement identiques suffisent aussi ;
+    pour le calendrier privé de Julien (stricte), jamais : il faut le nom."""
+    mots = mots_lieu(p["titre"] + " " + p.get("location", ""))
+    meilleur, score_max, ex_aequo = None, 0, False
+    for e in evenements:
+        debut = e.get("date_debut")
+        if not debut:
+            continue
+        fin = e.get("date_fin") or debut
+        if fin < p["debut"].isoformat() or debut > p["fin"].isoformat():
+            continue
+        commun = mots & mots_lieu(" ".join([e.get("titre_agenda") or "", e.get("titre") or "",
+                                            e.get("lieu") or "", clients.get(e.get("client_id"), "")]))
+        memes_dates = debut == p["debut"].isoformat() and fin == p["fin"].isoformat()
+        if not commun and (stricte or not memes_dates):
+            continue
+        score = len(commun) * 2 + (1 if memes_dates else 0)
+        if score > score_max:
+            meilleur, score_max, ex_aequo = e, score, False
+        elif score == score_max:
+            ex_aequo = True
+    # Deux concours aussi plausibles l'un que l'autre : on ne tire pas au sort.
+    return None if ex_aequo else meilleur
+
+
+def synchroniser_personnes(env, personnes, essai):
+    """personnes : liste de (nom, texte_ics). Retourne un résumé."""
+    aujourd_hui = date.today()
+    clients = {c["id"]: c["nom"] for c in tout_lire(env, "clients?select=id,nom")}
+    debut_fenetre = (aujourd_hui - timedelta(days=FENETRE_PASSE)).isoformat()
+    evenements = tout_lire(env, "evenements?select=id,titre,titre_agenda,lieu,client_id,date_debut,date_fin"
+                                "&date_debut=gte.%s" % (aujourd_hui - timedelta(days=30)).isoformat())
+    titres = {e["id"]: e.get("titre_agenda") or e.get("titre") for e in evenements}
+    try:
+        existantes = tout_lire(env, "affectations?select=id,evenement_id,personne,evenements(date_debut,date_fin)")
+    except urllib.error.HTTPError:
+        if not essai:
+            raise
+        print("(migration 0049 pas encore passée : essai sans affectations existantes)")
+        existantes = []
+
+    resume = []
+    for nom, texte in personnes:
+        stricte = normaliser(nom) == "julien"
+        items, _ = concours_de_l_agenda(texte, aujourd_hui)
+        trouves = {}
+        for p in items:
+            e = rapprocher(p, evenements, clients, stricte)
+            if e:
+                trouves[e["id"]] = e
+        a_garder = set(trouves)
+        deja = {a["evenement_id"]: a for a in existantes if a["personne"] == nom}
+        nouvelles = [eid for eid in a_garder if eid not in deja]
+        # On ne retire que des affectations à venir : l'historique reste.
+        perdues = [a for eid, a in deja.items() if eid not in a_garder
+                   and ((a.get("evenements") or {}).get("date_fin") or (a.get("evenements") or {}).get("date_debut") or "") >= debut_fenetre]
+        for eid in sorted(a_garder, key=lambda i: trouves[i].get("date_debut") or ""):
+            detail("  %s → %s %s" % (nom, trouves[eid].get("date_debut"), titres.get(eid)))
+        print("  %s : %d concours, dont %d nouveau(x), %d retiré(s)" % (nom, len(a_garder), len(nouvelles), len(perdues)))
+        resume.append("%s %d" % (nom, len(a_garder)))
+        if essai:
+            continue
+        if nouvelles:
+            requete(env, "POST", "affectations?on_conflict=evenement_id,personne",
+                    [{"evenement_id": eid, "personne": nom} for eid in nouvelles],
+                    prefer="resolution=merge-duplicates,return=minimal")
+        for a in perdues:
+            requete(env, "DELETE", "affectations?id=eq.%s" % a["id"], prefer="return=minimal")
+    return "affectations : " + ", ".join(resume) if resume else ""
 
 
 def main(argv):
@@ -318,11 +414,30 @@ def main(argv):
         print("Échec noté : " + argv[2])
         return 0
     if len(argv) < 2 or not os.path.exists(argv[1]):
-        print("Usage : timetree_sync.py saison.ics [--essai] | --echec \"message\"")
+        print("Usage : timetree_sync.py dossier/|saison.ics [--essai] | --echec \"message\"")
         return 1
-    texte = open(argv[1], encoding="utf-8").read()
+    essai = "--essai" in argv
+    if os.path.isdir(argv[1]):
+        index = json.load(open(os.path.join(argv[1], "index.json"), encoding="utf-8"))
+        lire = lambda f: open(os.path.join(argv[1], f), encoding="utf-8").read()
+        concours = [lire(f) for f, role in index.items() if role == "concours"]
+        personnes = [(role, lire(f)) for f, role in index.items() if role != "concours"]
+    else:
+        concours, personnes = [open(argv[1], encoding="utf-8").read()], []
     try:
-        synchroniser(env, texte, "--essai" in argv)
+        nb, messages = 0, []
+        for texte in concours:
+            n, msg = synchroniser(env, texte, essai)
+            nb += n
+            if msg:
+                messages.append(msg)
+        if personnes:
+            msg = synchroniser_personnes(env, personnes, essai)
+            if msg:
+                messages.append(msg)
+        if not essai:
+            noter_synchro(env, True, " · ".join(messages), nb=nb)
+            print("Synchronisé.")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
         print("Écriture refusée par Supabase : HTTP %s %s" % (e.code, detail))

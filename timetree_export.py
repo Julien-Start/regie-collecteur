@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+# La Régie — exporter plusieurs calendriers TimeTree en une seule connexion.
+#
+# Tourne dans GitHub Actions (Python ≥ 3.10, paquet timetree-exporter installé).
+# La liste vient de la variable TIMETREE_CALENDRIERS, au format
+#     Nom du calendrier=rôle;Autre calendrier=rôle
+# où le rôle vaut « concours » (le calendrier qui crée les concours) ou le nom
+# de la personne qui y figure (« Mya », « Julien »…). Exemple :
+#     D'clik agency=concours;Mya=Mya;Elisa=Elisa;Clarys=Clarys;Privé=Julien
+#
+# Écrit un fichier .ics par calendrier dans le dossier donné, plus un index
+# JSON {fichier: rôle}. Le dépôt est PUBLIC et ses journaux aussi : on n'y écrit
+# jamais les codes des calendriers, ni aucun titre d'événement.
+import json, os, sys, unicodedata
+
+from timetree_exporter.api.auth import login
+from timetree_exporter.api.calendar import TimeTreeCalendar
+from timetree_exporter.calendar import Calendar
+from timetree_exporter.exporter import Exporter
+
+
+def normaliser(s):
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.replace("’", "'").lower()
+    return " ".join("".join(c if c.isalnum() else " " for c in s).split())
+
+
+def lire_liste(valeur):
+    liste = []
+    for morceau in (valeur or "").split(";"):
+        if "=" in morceau:
+            nom, role = morceau.split("=", 1)
+            if nom.strip() and role.strip():
+                liste.append((nom.strip(), role.strip()))
+    return liste
+
+
+def main(argv):
+    dossier = argv[1] if len(argv) > 1 else "ics"
+    voulus = lire_liste(os.environ.get("TIMETREE_CALENDRIERS"))
+    if not voulus:
+        code = os.environ.get("TIMETREE_CALENDAR_CODE")
+        voulus = [("#" + code, "concours")] if code else []
+    if not voulus:
+        print("Aucun calendrier demandé.")
+        return 1
+    os.makedirs(dossier, exist_ok=True)
+
+    api = TimeTreeCalendar(login(os.environ["TIMETREE_EMAIL"], os.environ["TIMETREE_PASSWORD"]))
+    actifs = [m for m in api.get_metadata() if m.get("deactivated_at") is None]
+
+    index, manquants = {}, []
+    for nom, role in voulus:
+        if nom.startswith("#"):
+            trouves = [m for m in actifs if m.get("alias_code") == nom[1:]]
+        else:
+            trouves = [m for m in actifs if normaliser(m.get("name")) == normaliser(nom)]
+        if not trouves:
+            manquants.append(nom if not nom.startswith("#") else "(calendrier par code)")
+            continue
+        fichier = "%02d.ics" % (len(index) + 1)
+        Exporter(Calendar(api, trouves[0]), os.path.join(dossier, fichier)).export()
+        with open(os.path.join(dossier, fichier), "rb") as f:
+            n = f.read().count(b"BEGIN:VEVENT")
+        index[fichier] = role
+        print("Calendrier « %s » exporté · rôle : %s · %d événement(s)" % (
+            trouves[0].get("name") if not nom.startswith("#") else "concours", role, n))
+
+    with open(os.path.join(dossier, "index.json"), "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False)
+    if manquants:
+        print("Introuvable(s) dans TimeTree : %s" % ", ".join(manquants))
+    return 0 if index else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
