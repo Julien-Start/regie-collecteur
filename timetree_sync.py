@@ -286,7 +286,9 @@ def synchroniser(env, texte, essai):
             ligne = dict(champs, timetree_uid=c["uid"], source="timetree", titre=c["titre"], lieu=lieu,
                          client_id=cid, client_devine=devine, activite_id=id_dclik,
                          type_presta="captation_cso",
-                         statut="realise" if c["fin"] < aujourd_hui else "planifie")
+                         statut="realise" if c["fin"] < aujourd_hui else "planifie",
+                         # un concours passé importé n'appelle pas de « suivi satisfaction »
+                         suivi_fait=c["fin"] < aujourd_hui)
             ligne["_appris"] = c["appris"]
             nouveaux.append(ligne)
             continue
