@@ -35,6 +35,7 @@ jobs:
           # Calendriers à lire : « Nom=concours » pour celui qui crée les concours,
           # « Nom=Personne » pour ceux qui disent qui y va. Variable du dépôt.
           TIMETREE_CALENDRIERS: ${{ vars.TIMETREE_CALENDRIERS }}
+          DROPBOX_CONCOURS_CSV: ${{ secrets.DROPBOX_CONCOURS_CSV }}
         run: |
           if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then
             echo "Secrets TimeTree absents : rien à synchroniser."
@@ -58,4 +59,6 @@ jobs:
             echo "$MSG"
             python timetree_sync.py --echec "$MSG"
           fi
+          # L'ordre des épreuves (Concours_DCK.csv, lien Dropbox) : ne bloque jamais le passage.
+          python epreuves_sync.py || true
           rm -rf ics export.log

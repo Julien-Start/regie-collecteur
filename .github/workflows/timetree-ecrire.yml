@@ -25,6 +25,7 @@ jobs:
           TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
           TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
           TIMETREE_CALENDRIERS: ${{ vars.TIMETREE_CALENDRIERS }}
+          DROPBOX_CONCOURS_CSV: ${{ secrets.DROPBOX_CONCOURS_CSV }}
         run: |
           if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then
             echo "Secrets TimeTree absents : rien à écrire."
@@ -36,4 +37,6 @@ jobs:
             cat export.log
             python timetree_sync.py ics
           fi
+          # L'ordre des épreuves (Concours_DCK.csv, lien Dropbox) : ne bloque jamais le passage.
+          python epreuves_sync.py || true
           rm -rf ics export.log
