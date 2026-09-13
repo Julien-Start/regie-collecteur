@@ -71,7 +71,8 @@ def noter_etiquettes(env, api, meta, role):
         labels = api.get_labels(meta["id"]) or {}
         couleur = lambda c: ("#" + c.strip().lstrip("#")) if (c or "").strip() else ""
         liste = [{"id": int(k), "nom": v.get("name") or "", "couleur": couleur(v.get("color"))}
-                 for k, v in sorted(labels.items(), key=lambda kv: int(kv[0])) if (v.get("name") or "").strip()]
+                 for k, v in sorted(labels.items(), key=lambda kv: int(kv[0]))
+                 if (v.get("name") or "").strip() or (v.get("color") or "").strip()]   # sans nom : par sa couleur
         ts.requete(env, "POST", "calendriers_timetree?on_conflict=nom",
                    [{"nom": meta.get("name"), "role": role, "etiquettes": liste,
                      "vu_le": datetime.now(timezone.utc).isoformat()}],

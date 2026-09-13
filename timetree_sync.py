@@ -190,7 +190,8 @@ def concours_de_l_agenda(texte, aujourd_hui):
         brutes = [c.strip() for c in _valeur(ev.get("CATEGORIES", ({}, ""))[1]).split(",") if c.strip()]
         cats = [normaliser(c) for c in brutes]
         lieu = _valeur(ev.get("LOCATION", ({}, ""))[1]).strip()
-        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "location": lieu})
+        couleur = ev.get("COLOR", ({}, ""))[1].strip()
+        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "couleur": couleur, "location": lieu})
     return retenus, ecartes
 
 
@@ -394,10 +395,18 @@ def synchroniser_personnes(env, personnes, essai):
                          for r in tout_lire(env, "regles_agenda?select=cle,nature")}
     except urllib.error.HTTPError:
         regles_toutes = {}
+    try:
+        uuids_copies = {c["uuid"]: c["personne"] for c in tout_lire(env, "copies_timetree?select=uuid,personne")}
+    except urllib.error.HTTPError:
+        uuids_copies = {}
     resume = []
     for nom, texte in personnes:
         stricte = normaliser(nom) == "julien"
         items, _ = concours_de_l_agenda(texte, aujourd_hui)
+        # Vérification des copies envoyées par La Régie : retrouvées, et avec quelle couleur.
+        for p in items:
+            if uuids_copies.get(p["uid"]) == nom:
+                print("  %s : copie envoyée par La Régie retrouvée dans son agenda · couleur %s" % (nom, p.get("couleur") or "par défaut"))
         # Décompte anonyme, lisible dans le journal public : aucune date ni aucun titre.
         chevauchent = sum(1 for p in items if any(
             (e.get("date_debut") or "9999") <= p["fin"].isoformat()

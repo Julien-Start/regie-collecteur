@@ -87,6 +87,8 @@ class TimeTree:
         """L'identifiant de l'étiquette qui porte ce nom dans ce calendrier, ou None."""
         if not nom:
             return None
+        if re.fullmatch(r"#\d+", nom.strip()):      # étiquette sans nom, désignée par son numéro
+            return int(nom.strip()[1:])
         if cal_id not in self._labels:
             self._labels[cal_id] = self.lecture.get_labels(cal_id) or {}
         return next((int(k) for k, v in self._labels[cal_id].items() if normaliser(v.get("name")) == normaliser(nom)), None)
