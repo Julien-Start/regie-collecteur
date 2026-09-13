@@ -16,7 +16,7 @@
 #                         (sauf si un devis ou une facture y est attaché)
 # Seuls titre, dates et lieu sont écrits. Chaque écriture envoie l'état COURANT.
 # Journal public (dépôt public) : aucun titre, aucune date, aucun identifiant.
-import os, re, sys, json, unicodedata
+import os, re, sys, json, colorsys, unicodedata
 from datetime import datetime, date, timezone
 
 import requests
@@ -82,9 +82,28 @@ class TimeTree:
             raise RuntimeError("calendrier introuvable dans TimeTree")
         return cal["id"]
 
-    def label_shf(self, cal_id):
+    def etiquettes_couleur(self, cal_id):
+        """Julien veut la SHF en BLEU et les autres clients en ROUGE. On ne connaît pas les
+        noms de ses étiquettes, mais leurs couleurs : on prend la plus proche de chaque teinte."""
         labels = self.lecture.get_labels(cal_id) or {}
-        return next((int(k) for k, v in labels.items() if "shf" in normaliser(v.get("name"))), None)
+        palette = []
+        for k, v in labels.items():
+            hexa = (v.get("color") or "").strip().lstrip("#")
+            if not re.fullmatch(r"[0-9A-Fa-f]{6}", hexa):
+                continue
+            r, g, b = (int(hexa[i:i + 2], 16) / 255 for i in (0, 2, 4))
+            h, l, sat = colorsys.rgb_to_hls(r, g, b)
+            palette.append((int(k), hexa.upper(), h * 360, sat))
+        print("Étiquettes du calendrier des concours : " + ", ".join("%d=#%s" % (i, x) for i, x, _, _ in sorted(palette)))
+
+        def plus_proche(cible):
+            vives = [p for p in palette if p[3] >= 0.25]
+            if not vives:
+                return None
+            return min(vives, key=lambda p: min(abs(p[2] - cible), 360 - abs(p[2] - cible)))[0]
+        bleu, rouge = plus_proche(215), plus_proche(0)
+        print("Bleu (SHF) → étiquette %s · rouge (autres) → étiquette %s" % (bleu, rouge))
+        return bleu, rouge
 
     def creer(self, cal_id, corps):
         corps = dict(corps, category=1, attendees=[], alerts=[], recurrences=[], file_uuids=[])
@@ -123,7 +142,7 @@ def main():
 
     tt = TimeTree()
     cal_concours = tt.calendrier(nom_concours)
-    label_shf = tt.label_shf(cal_concours)
+    bleu, rouge = tt.etiquettes_couleur(cal_concours)
     ids_shf = {c["id"] for c in ts.tout_lire(env, "clients?select=id,nom") if normaliser(c["nom"]).startswith("shf")}
     calendrier_de = {p["nom"]: p["calendrier"] for p in ts.tout_lire(env, "personnes?select=nom,calendrier") if p.get("calendrier")}
 
@@ -142,8 +161,9 @@ def main():
 
             if action in ("creer", "modifier"):
                 principal = dict(corps)
-                if label_shf and ev.get("client_id") in ids_shf:
-                    principal["label_id"] = label_shf
+                couleur = bleu if ev.get("client_id") in ids_shf else rouge
+                if couleur:
+                    principal["label_id"] = couleur
                 if ev.get("source") in ("timetree", "regie"):
                     if ev.get("timetree_uid") and ev.get("source") == "timetree":
                         tt.modifier(cal_concours, ev["timetree_uid"], principal)
