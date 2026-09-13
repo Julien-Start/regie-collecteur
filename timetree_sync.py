@@ -174,16 +174,34 @@ def normaliser(s):
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s.lower()).split())
 
 
-def concours_de_l_agenda(texte, aujourd_hui):
+def _jour_horaire(prop):
+    """Le jour d'un événement à heure fixe (20260908T070000Z → 2026-09-08)."""
+    if not prop:
+        return None
+    val = prop[1].strip()
+    return datetime.strptime(val[:8], "%Y%m%d").date() if re.match(r"\d{8}T", val) else None
+
+
+def concours_de_l_agenda(texte, aujourd_hui, horaires=False):
+    """Les événements en journées entières. Avec horaires=True, aussi ceux à heure
+    fixe (réduits à leur jour) : une prestation d'une journée est parfois notée
+    « 8 h → 19 h » dans le calendrier privé."""
     retenus, ecartes = [], []
     for ev in lire_ics(texte):
         titre = _valeur(ev.get("SUMMARY", ({}, ""))[1]).strip()
         debut, jour_entier = _date(ev.get("DTSTART"))
-        if not titre or not debut or not jour_entier:
+        horaire = False
+        if titre and not debut and horaires:
+            debut, horaire = _jour_horaire(ev.get("DTSTART")), True
+        if not titre or not debut or (not jour_entier and not horaire):
             ecartes.append(titre or "(sans titre)")
             continue
-        fin_excl, _ = _date(ev.get("DTEND"))
-        fin = (fin_excl - timedelta(days=1)) if fin_excl and fin_excl > debut else debut
+        if horaire:
+            fin = _jour_horaire(ev.get("DTEND")) or debut
+            fin = fin if fin >= debut else debut
+        else:
+            fin_excl, _ = _date(ev.get("DTEND"))
+            fin = (fin_excl - timedelta(days=1)) if fin_excl and fin_excl > debut else debut
         if fin < aujourd_hui - timedelta(days=FENETRE_PASSE) or debut > aujourd_hui + timedelta(days=FENETRE_AVENIR):
             continue
         uid = ev.get("UID", ({}, ""))[1].strip() or hashlib.sha1((titre + debut.isoformat()).encode()).hexdigest()
@@ -191,7 +209,7 @@ def concours_de_l_agenda(texte, aujourd_hui):
         cats = [normaliser(c) for c in brutes]
         lieu = _valeur(ev.get("LOCATION", ({}, ""))[1]).strip()
         couleur = ev.get("COLOR", ({}, ""))[1].strip()
-        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "couleur": couleur, "location": lieu})
+        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "couleur": couleur, "location": lieu, "horaire": horaire})
     return retenus, ecartes
 
 
@@ -377,6 +395,14 @@ def rapprocher(p, evenements, clients, stricte):
     return None if ex_aequo else meilleur
 
 
+# Les mots qui signalent une prestation dans un titre d'agenda.
+MOTS_PRESTATION = {
+    "ecran", "ecrans", "shf", "cso", "cce", "cir", "captation", "live", "streaming", "concours",
+    "jumping", "dressage", "endurance", "tournage", "video", "videos", "regie", "chrono", "gsp", "equita",
+    "finale", "championnat", "championnats", "grand", "prix", "etape", "tour",
+}
+
+
 def synchroniser_personnes(env, personnes, essai):
     """personnes : liste de (nom, texte_ics). Retourne un résumé."""
     aujourd_hui = date.today()
@@ -398,6 +424,15 @@ def synchroniser_personnes(env, personnes, essai):
                          for r in tout_lire(env, "regles_agenda?select=cle,nature")}
     except urllib.error.HTTPError:
         regles_toutes = {}
+    # Noms de clients et de concours déjà connus : un de leurs mots dans un titre privé
+    # vaut indice de prestation. On écarte les mots trop courts ou trop communs.
+    mots_connus = set()
+    for nom_client in clients.values():
+        mots_connus |= {m for m in normaliser(nom_client).split() if len(m) >= 5 and m not in MOTS_VIDES}
+    for cle, nature in regles_toutes.items():
+        if nature == "concours":
+            mots_connus |= {m for m in cle.split() if len(m) >= 4 and m not in MOTS_VIDES}
+    mots_connus -= {"equitation", "equestre", "centre", "societe", "hippique", "association", "organisation", "francaise"}
     try:
         uuids_copies = {c["uuid"]: c["personne"] for c in tout_lire(env, "copies_timetree?select=uuid,personne")}
     except urllib.error.HTTPError:
@@ -430,8 +465,17 @@ def synchroniser_personnes(env, personnes, essai):
         # concours connu est PROPOSÉ à Julien (ou décidé d'office si une règle existe).
         propositions, auto = [], []
         if stricte:
-            for p in items:
-                if (p["fin"] - p["debut"]).days < 1 or p["fin"] < aujourd_hui:
+            # Deux façons pour un événement du calendrier privé d'être proposé :
+            #  - il dure plusieurs jours et il est à venir (règle d'origine) ;
+            #  - son titre RESSEMBLE à une prestation (mot du métier, client ou concours
+            #    connu), même sur une journée, même à heure fixe, jusqu'à 60 jours dans
+            #    le passé : pour rattraper une prestation faite et pas encore facturée.
+            # Un anniversaire ou un rendez-vous perso ne remplit ni l'une ni l'autre.
+            vocab = MOTS_PRESTATION | mots_connus
+            for p in concours_de_l_agenda(texte, aujourd_hui, horaires=True)[0]:
+                long_a_venir = (p["fin"] - p["debut"]).days >= 1 and p["fin"] >= aujourd_hui and not p.get("horaire")
+                ressemble = bool(set(normaliser(p["titre"]).split()) & vocab) and p["fin"] >= aujourd_hui - timedelta(days=60)
+                if not (long_a_venir or ressemble):
                     continue
                 if any(rapprocher(p, [e], clients, False) for e in evenements):
                     continue                     # déjà un concours à ces dates et à ce nom
