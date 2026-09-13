@@ -1,0 +1,46 @@
+name: Export TimeTree par mail
+
+# Lancé à la main uniquement. Exporte TOUS les événements d'un calendrier
+# TimeTree et envoie le .ics par mail, depuis une boîte de Julien vers elle-même.
+# Le fichier n'est jamais conservé dans GitHub : le dépôt est public.
+
+on:
+  workflow_dispatch:
+    inputs:
+      adresse:
+        description: "Boîte qui envoie et reçoit le fichier"
+        required: true
+        default: "j.rouyer@dclik-agency.com"
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Exporter et envoyer
+        env:
+          COMPTES_JSON: ${{ secrets.COMPTES_JSON }}
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_CALENDAR_CODE: ${{ secrets.TIMETREE_CALENDAR_CODE }}
+          ADRESSE: ${{ inputs.adresse }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ] || [ -z "$TIMETREE_CALENDAR_CODE" ]; then
+            echo "Secrets TimeTree absents : rien à exporter."
+            exit 1
+          fi
+          python -m pip install --quiet timetree-exporter
+          if ! timetree-exporter -c "$TIMETREE_CALENDAR_CODE" -o dclik-agency.ics > export.log 2>&1 || [ ! -s dclik-agency.ics ]; then
+            echo "Export TimeTree en échec :"
+            tail -n 5 export.log | sed -e "s/$(printf '%s' "$TIMETREE_EMAIL" | sed 's/[.[\*^$/]/\\&/g')/***/g"
+            rm -f dclik-agency.ics export.log
+            exit 1
+          fi
+          echo "Événements exportés : $(grep -c '^BEGIN:VEVENT' dclik-agency.ics)"
+          python timetree_envoi.py dclik-agency.ics "$ADRESSE"
+          rm -f dclik-agency.ics export.log
