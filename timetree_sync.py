@@ -44,6 +44,7 @@ MOTS_VIDES = {
     "club", "tour", "sur", "les", "des", "de", "du", "la", "le", "et", "en", "concours",
     "international", "national", "regional", "finale", "championnat", "championnats",
     "ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii",
+    "sur", "les", "des", "aux", "pour", "avec", "une", "est", "jour", "rdv", "am", "pm",
 }
 
 
@@ -326,8 +327,9 @@ def synchroniser(env, texte, essai):
 # --------------------------------------------------------------------------- #
 
 def mots_lieu(texte):
+    # Trois lettres suffisent : les sigles des grands rendez-vous (GSP, CIR) sont des noms.
     return {m for m in normaliser(texte).split()
-            if len(m) >= 4 and m not in MOTS_VIDES and m not in ROMAINS and not m.isdigit()}
+            if len(m) >= 3 and m not in MOTS_VIDES and m not in ROMAINS and not m.isdigit()}
 
 
 def rapprocher(p, evenements, clients, stricte):
@@ -378,6 +380,10 @@ def synchroniser_personnes(env, personnes, essai):
     for nom, texte in personnes:
         stricte = normaliser(nom) == "julien"
         items, _ = concours_de_l_agenda(texte, aujourd_hui)
+        # Décompte anonyme, lisible dans le journal public : aucune date ni aucun titre.
+        chevauchent = sum(1 for p in items if any(
+            (e.get("date_debut") or "9999") <= p["fin"].isoformat()
+            and (e.get("date_fin") or e.get("date_debut") or "") >= p["debut"].isoformat() for e in evenements))
         trouves = {}
         for p in items:
             e = rapprocher(p, evenements, clients, stricte)
@@ -391,7 +397,8 @@ def synchroniser_personnes(env, personnes, essai):
                    and ((a.get("evenements") or {}).get("date_fin") or (a.get("evenements") or {}).get("date_debut") or "") >= debut_fenetre]
         for eid in sorted(a_garder, key=lambda i: trouves[i].get("date_debut") or ""):
             detail("  %s → %s %s" % (nom, trouves[eid].get("date_debut"), titres.get(eid)))
-        print("  %s : %d concours, dont %d nouveau(x), %d retiré(s)" % (nom, len(a_garder), len(nouvelles), len(perdues)))
+        print("  %s : %d journée(s) entière(s) à venir, %d aux dates d'un concours → %d concours rattaché(s) (%d nouveau(x), %d retiré(s))"
+              % (nom, len(items), chevauchent, len(a_garder), len(nouvelles), len(perdues)))
         resume.append("%s %d" % (nom, len(a_garder)))
         if essai:
             continue
