@@ -179,11 +179,17 @@ def main():
 
             if action in ("creer", "modifier"):
                 principal = dict(corps)
-                a_valider = normaliser(ev.get("etiquette_agenda")) == "a valider"
-                couleur = bleu if ev.get("client_id") in ids_shf else rouge
-                if couleur and not a_valider:
-                    principal["label_id"] = couleur
-                if ev.get("source") in ("timetree", "regie"):
+                if ev.get("etiquette_choisie"):          # étiquette choisie par Julien : elle gagne
+                    lab = tt.etiquette(cal_concours, ev["etiquette_choisie"])
+                    if lab:
+                        principal["label_id"] = lab
+                else:
+                    a_valider = normaliser(ev.get("etiquette_agenda")) == "a valider"
+                    couleur = bleu if ev.get("client_id") in ids_shf else rouge
+                    if couleur and not a_valider:
+                        principal["label_id"] = couleur
+                # Un concours inscrit dans l'agenda d'une personne n'existe QUE par sa copie.
+                if ev.get("source") in ("timetree", "regie") and not ev.get("calendrier"):
                     if ev.get("timetree_uid") and ev.get("source") == "timetree":
                         tt.modifier(cal_concours, ev["timetree_uid"], principal)
                     elif not ev.get("timetree_uid"):
@@ -195,7 +201,8 @@ def main():
                                {"titre_agenda": corps["title"], "cle_agenda": ts.cle_agenda(corps["title"])}, prefer="return=minimal")
                 for c in copies:                          # les copies suivent le concours
                     cal_copie = tt.calendrier(c["calendrier"])
-                    lab = tt.etiquette(cal_copie, etiquette_de.get(c["personne"]))
+                    choisie = ev.get("etiquette_choisie") if ev.get("calendrier") == c["calendrier"] else None
+                    lab = tt.etiquette(cal_copie, choisie or etiquette_de.get(c["personne"]))
                     tt.modifier(cal_copie, c["uuid"], dict(corps, label_id=lab) if lab else corps)
 
             elif action == "copier":
@@ -204,7 +211,8 @@ def main():
                     if not nom_cal:
                         raise RuntimeError("cette personne n'a pas de calendrier TimeTree")
                     cal_copie = tt.calendrier(nom_cal)
-                    lab = tt.etiquette(cal_copie, etiquette_de.get(personne))
+                    choisie = ev.get("etiquette_choisie") if ev.get("calendrier") == nom_cal else None
+                    lab = tt.etiquette(cal_copie, choisie or etiquette_de.get(personne))
                     uuid = tt.creer(cal_copie, dict(corps, label_id=lab) if lab else corps)
                     ts.requete(env, "POST", "copies_timetree?on_conflict=evenement_id,personne",
                                [{"evenement_id": eid, "personne": personne, "calendrier": nom_cal, "uuid": uuid}],

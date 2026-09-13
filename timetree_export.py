@@ -63,6 +63,23 @@ def noter_calendrier(env, nom, trouve):
         pass
 
 
+def noter_etiquettes(env, api, meta, role):
+    """Garde dans La Régie les étiquettes de ce calendrier, pour que le cockpit les propose."""
+    import timetree_sync as ts
+    from datetime import datetime, timezone
+    try:
+        labels = api.get_labels(meta["id"]) or {}
+        couleur = lambda c: ("#" + c.strip().lstrip("#")) if (c or "").strip() else ""
+        liste = [{"id": int(k), "nom": v.get("name") or "", "couleur": couleur(v.get("color"))}
+                 for k, v in sorted(labels.items(), key=lambda kv: int(kv[0])) if (v.get("name") or "").strip()]
+        ts.requete(env, "POST", "calendriers_timetree?on_conflict=nom",
+                   [{"nom": meta.get("name"), "role": role, "etiquettes": liste,
+                     "vu_le": datetime.now(timezone.utc).isoformat()}],
+                   prefer="resolution=merge-duplicates,return=minimal")
+    except Exception:
+        pass
+
+
 def main(argv):
     dossier = argv[1] if len(argv) > 1 else "ics"
     variable = lire_liste(os.environ.get("TIMETREE_CALENDRIERS"))
@@ -97,6 +114,8 @@ def main(argv):
             continue
         if env_regie and role != "concours":
             noter_calendrier(env_regie, role, True)
+        if env_regie:
+            noter_etiquettes(env_regie, api, trouves[0], role)
         fichier = "%02d.ics" % (len(index) + 1)
         Exporter(Calendar(api, trouves[0]), os.path.join(dossier, fichier)).export()
         with open(os.path.join(dossier, fichier), "rb") as f:
