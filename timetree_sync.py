@@ -445,7 +445,7 @@ def synchroniser_personnes(env, personnes, essai):
                   % (nom, len(propositions), len(auto)))
         for eid in sorted(a_garder, key=lambda i: trouves[i].get("date_debut") or ""):
             detail("  %s → %s %s" % (nom, trouves[eid].get("date_debut"), titres.get(eid)))
-        print("  %s : %d journée(s) entière(s) à venir, %d aux dates d'un concours → %d concours rattaché(s) (%d nouveau(x), %d retiré(s))"
+        print("  %s : %d journée(s) entière(s) lue(s) sur l'année, %d aux dates d'un concours → %d concours rattaché(s) (%d nouveau(x), %d retiré(s))"
               % (nom, len(items), chevauchent, len(a_garder), len(nouvelles), len(perdues)))
         resume.append("%s %d" % (nom, len(a_garder)))
         if essai:
