@@ -369,7 +369,7 @@ def synchroniser_personnes(env, personnes, essai):
                                 "&date_debut=gte.%s" % (aujourd_hui - timedelta(days=30)).isoformat())
     titres = {e["id"]: e.get("titre_agenda") or e.get("titre") for e in evenements}
     try:
-        existantes = tout_lire(env, "affectations?select=id,evenement_id,personne,evenements(date_debut,date_fin)")
+        existantes = tout_lire(env, "affectations?select=id,evenement_id,personne,source,evenements(date_debut,date_fin)")
     except urllib.error.HTTPError:
         if not essai:
             raise
@@ -398,7 +398,8 @@ def synchroniser_personnes(env, personnes, essai):
         deja = {a["evenement_id"]: a for a in existantes if a["personne"] == nom}
         nouvelles = [eid for eid in a_garder if eid not in deja]
         # On ne retire que des affectations à venir : l'historique reste.
-        perdues = [a for eid, a in deja.items() if eid not in a_garder
+        # Une affectation posée à la main dans La Régie n'est jamais retirée par la synchro.
+        perdues = [a for eid, a in deja.items() if eid not in a_garder and a.get("source") != "manuel"
                    and ((a.get("evenements") or {}).get("date_fin") or (a.get("evenements") or {}).get("date_debut") or "") >= debut_fenetre]
         # Calendrier privé : un événement de plusieurs jours qui ne tombe sur aucun
         # concours connu est PROPOSÉ à Julien (ou décidé d'office si une règle existe).

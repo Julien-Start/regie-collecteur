@@ -1,0 +1,39 @@
+name: Écrire dans TimeTree
+
+# Déclenché par La Régie quand un concours est créé ou modifié.
+# Envoie à TimeTree les écritures en attente, puis relit la saison.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: saison-timetree
+  cancel-in-progress: false
+
+jobs:
+  ecrire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Écrire puis relire
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_CALENDRIERS: ${{ vars.TIMETREE_CALENDRIERS }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then
+            echo "Secrets TimeTree absents : rien à écrire."
+            exit 0
+          fi
+          python -m pip install --quiet timetree-exporter
+          python timetree_ecrire.py
+          if python timetree_export.py ics > export.log 2>&1; then
+            cat export.log
+            python timetree_sync.py ics
+          fi
+          rm -rf ics export.log

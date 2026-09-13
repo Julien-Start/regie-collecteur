@@ -42,6 +42,8 @@ jobs:
           fi
           python -m pip install --quiet timetree-exporter
           python -m pip show timetree-exporter | grep -i '^version' || true
+          # Filet de sécurité : ce que La Régie n'aurait pas encore réussi à écrire.
+          python timetree_ecrire.py || true
           # L'export ne doit jamais faire échouer le passage : un échec est noté
           # dans La Régie, qui le signale dans le radar au bout de trois jours.
           if python timetree_export.py ics > export.log 2>&1; then
