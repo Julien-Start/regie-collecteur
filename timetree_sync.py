@@ -23,7 +23,7 @@
 #   - on ne change jamais le statut d'un événement existant ;
 #   - un événement qui disparaît de TimeTree n'est jamais supprimé : il est marqué.
 # Stdlib uniquement, comme le collecteur.
-import sys, os, re, json, ssl, hashlib, unicodedata, urllib.request, urllib.parse, urllib.error
+import sys, os, re, json, ssl, time, hashlib, unicodedata, urllib.request, urllib.parse, urllib.error
 from datetime import date, datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -79,10 +79,22 @@ def requete(env, methode, chemin, corps=None, prefer=None):
         donnees = json.dumps(corps).encode("utf-8")
     if prefer:
         entetes["Prefer"] = prefer
-    req = urllib.request.Request(url, data=donnees, method=methode, headers=entetes)
-    with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
-        brut = r.read().decode("utf-8")
-        return json.loads(brut) if brut.strip() else None
+    # Supabase répond parfois 502/503/504 quelques secondes. On retente, mais
+    # jamais une création (POST) : la rejouer pourrait créer un doublon.
+    essais = 3 if methode in ("GET", "PATCH", "DELETE") else 1
+    for n in range(essais):
+        req = urllib.request.Request(url, data=donnees, method=methode, headers=entetes)
+        try:
+            with urllib.request.urlopen(req, context=ssl.create_default_context(), timeout=30) as r:
+                brut = r.read().decode("utf-8")
+                return json.loads(brut) if brut.strip() else None
+        except urllib.error.HTTPError as e:
+            if e.code not in (502, 503, 504) or n == essais - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if n == essais - 1:
+                raise
+        time.sleep(3 * (n + 1))
 
 
 def tout_lire(env, chemin):
