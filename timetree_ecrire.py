@@ -75,12 +75,21 @@ class TimeTree:
         if not m:
             raise RuntimeError("jeton CSRF introuvable (TimeTree a peut-être changé)")
         self.entetes = {"Content-Type": "application/json", "X-Timetreea": "web/2.1.0/en", "x-csrf-token": m.group(1)}
+        self._labels = {}
 
     def calendrier(self, nom):
         cal = self.calendriers.get(normaliser(nom))
         if not cal:
             raise RuntimeError("calendrier introuvable dans TimeTree")
         return cal["id"]
+
+    def etiquette(self, cal_id, nom):
+        """L'identifiant de l'étiquette qui porte ce nom dans ce calendrier, ou None."""
+        if not nom:
+            return None
+        if cal_id not in self._labels:
+            self._labels[cal_id] = self.lecture.get_labels(cal_id) or {}
+        return next((int(k) for k, v in self._labels[cal_id].items() if normaliser(v.get("name")) == normaliser(nom)), None)
 
     def etiquettes_couleur(self, cal_id):
         """Julien veut la SHF en BLEU et les autres clients en ROUGE. On ne connaît pas les
@@ -142,9 +151,18 @@ def main():
 
     tt = TimeTree()
     cal_concours = tt.calendrier(nom_concours)
-    bleu, rouge = tt.etiquettes_couleur(cal_concours)
+    # Étiquettes de « D'clik agency » par leur NOM (SHF, DCK) ; repli sur la couleur
+    # si l'une d'elles a été renommée. A VALIDER n'est jamais écrasée.
+    bleu = tt.etiquette(cal_concours, "SHF")
+    rouge = tt.etiquette(cal_concours, "DCK")
+    if not bleu or not rouge:
+        b2, r2 = tt.etiquettes_couleur(cal_concours)
+        bleu, rouge = bleu or b2, rouge or r2
+    print("Étiquettes : SHF → %s · DCK → %s" % (bleu, rouge))
     ids_shf = {c["id"] for c in ts.tout_lire(env, "clients?select=id,nom") if normaliser(c["nom"]).startswith("shf")}
-    calendrier_de = {p["nom"]: p["calendrier"] for p in ts.tout_lire(env, "personnes?select=nom,calendrier") if p.get("calendrier")}
+    pers = ts.tout_lire(env, "personnes?select=nom,calendrier,etiquette")
+    calendrier_de = {p["nom"]: p["calendrier"] for p in pers if p.get("calendrier")}
+    etiquette_de = {p["nom"]: p.get("etiquette") for p in pers}
 
     attente.sort(key=lambda e: (e["evenement_id"], ORDRE.get(e["action"], 9), e["id"]))
     faits = echecs = 0
@@ -161,8 +179,9 @@ def main():
 
             if action in ("creer", "modifier"):
                 principal = dict(corps)
+                a_valider = normaliser(ev.get("etiquette_agenda")) == "a valider"
                 couleur = bleu if ev.get("client_id") in ids_shf else rouge
-                if couleur:
+                if couleur and not a_valider:
                     principal["label_id"] = couleur
                 if ev.get("source") in ("timetree", "regie"):
                     if ev.get("timetree_uid") and ev.get("source") == "timetree":
@@ -175,14 +194,18 @@ def main():
                     ts.requete(env, "PATCH", "evenements?id=eq.%s" % eid,
                                {"titre_agenda": corps["title"], "cle_agenda": ts.cle_agenda(corps["title"])}, prefer="return=minimal")
                 for c in copies:                          # les copies suivent le concours
-                    tt.modifier(tt.calendrier(c["calendrier"]), c["uuid"], corps)
+                    cal_copie = tt.calendrier(c["calendrier"])
+                    lab = tt.etiquette(cal_copie, etiquette_de.get(c["personne"]))
+                    tt.modifier(cal_copie, c["uuid"], dict(corps, label_id=lab) if lab else corps)
 
             elif action == "copier":
                 if not any(c["personne"] == personne for c in copies):
                     nom_cal = calendrier_de.get(personne)
                     if not nom_cal:
                         raise RuntimeError("cette personne n'a pas de calendrier TimeTree")
-                    uuid = tt.creer(tt.calendrier(nom_cal), corps)
+                    cal_copie = tt.calendrier(nom_cal)
+                    lab = tt.etiquette(cal_copie, etiquette_de.get(personne))
+                    uuid = tt.creer(cal_copie, dict(corps, label_id=lab) if lab else corps)
                     ts.requete(env, "POST", "copies_timetree?on_conflict=evenement_id,personne",
                                [{"evenement_id": eid, "personne": personne, "calendrier": nom_cal, "uuid": uuid}],
                                prefer="resolution=merge-duplicates,return=minimal")

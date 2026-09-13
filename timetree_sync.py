@@ -187,9 +187,10 @@ def concours_de_l_agenda(texte, aujourd_hui):
         if fin < aujourd_hui - timedelta(days=FENETRE_PASSE) or debut > aujourd_hui + timedelta(days=FENETRE_AVENIR):
             continue
         uid = ev.get("UID", ({}, ""))[1].strip() or hashlib.sha1((titre + debut.isoformat()).encode()).hexdigest()
-        cats = [normaliser(c) for c in _valeur(ev.get("CATEGORIES", ({}, ""))[1]).split(",") if c.strip()]
+        brutes = [c.strip() for c in _valeur(ev.get("CATEGORIES", ({}, ""))[1]).split(",") if c.strip()]
+        cats = [normaliser(c) for c in brutes]
         lieu = _valeur(ev.get("LOCATION", ({}, ""))[1]).strip()
-        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "location": lieu})
+        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "location": lieu})
     return retenus, ecartes
 
 
@@ -257,7 +258,7 @@ def synchroniser(env, texte, essai):
         passe = tout_lire(env, "evenements?select=client_id,lieu,date_debut&timetree_uid=is.null")
         existants = {e["timetree_uid"]: e for e in tout_lire(env,
             "evenements?select=id,timetree_uid,titre,titre_agenda,cle_agenda,date_debut,date_fin,lieu,client_id,"
-            "client_devine,corrige_le,retire_agenda_le&timetree_uid=not.is.null&source=eq.timetree")}
+            "client_devine,corrige_le,retire_agenda_le,etiquette_agenda&timetree_uid=not.is.null&source=eq.timetree")}
         regles = {r["cle"]: r for r in tout_lire(env, "regles_agenda?select=cle,client_id,lieu,nature") if r.get("nature", "concours") == "concours"}
     except urllib.error.HTTPError as e:
         if not essai:
@@ -278,7 +279,7 @@ def synchroniser(env, texte, essai):
             lieu = lieu_de(c)
         c["appris"] = bool(regle)
         champs = {"titre_agenda": c["titre"], "cle_agenda": cle, "date_debut": c["debut"].isoformat(),
-                  "date_fin": c["fin"].isoformat()}
+                  "date_fin": c["fin"].isoformat(), "etiquette_agenda": c.get("etiquette")}
         ex = existants.get(c["uid"])
         if not ex:
             ligne = dict(champs, timetree_uid=c["uid"], source="timetree", titre=c["titre"], lieu=lieu,

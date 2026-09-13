@@ -2,7 +2,10 @@
 # La Régie — exporter plusieurs calendriers TimeTree en une seule connexion.
 #
 # Tourne dans GitHub Actions (Python ≥ 3.10, paquet timetree-exporter installé).
-# La liste vient de la variable TIMETREE_CALENDRIERS, au format
+# Le calendrier des concours vient de la variable TIMETREE_CALENDRIERS (rôle
+# « concours ») ; les calendriers des personnes viennent de la table `personnes`
+# de La Régie, que Julien tient à jour lui-même (repli sur la variable si la
+# base est injoignable). Format de la variable :
 #     Nom du calendrier=rôle;Autre calendrier=rôle
 # où le rôle vaut « concours » (le calendrier qui crée les concours) ou le nom
 # de la personne qui y figure (« Mya », « Julien »…). Exemple :
@@ -36,9 +39,40 @@ def lire_liste(valeur):
     return liste
 
 
+def personnes_de_la_regie():
+    """[(calendrier, nom)] des personnes actives qui ont un calendrier, ou None."""
+    try:
+        import timetree_sync as ts
+        env = ts.charger_env()
+        if not env.get("SUPABASE_URL"):
+            return None
+        lignes = ts.requete(env, "GET", "personnes?actif=eq.true&calendrier=not.is.null&select=nom,calendrier") or []
+        return [(l["calendrier"], l["nom"]) for l in lignes if (l.get("calendrier") or "").strip()], env
+    except Exception:
+        return None
+
+
+def noter_calendrier(env, nom, trouve):
+    import timetree_sync as ts
+    from datetime import datetime, timezone
+    corps = {"calendrier_vu_le": datetime.now(timezone.utc).isoformat(), "calendrier_erreur": None} if trouve \
+        else {"calendrier_erreur": "calendrier introuvable dans TimeTree"}
+    try:
+        ts.requete(env, "PATCH", "personnes?nom=eq.%s" % __import__("urllib.parse").parse.quote(nom), corps, prefer="return=minimal")
+    except Exception:
+        pass
+
+
 def main(argv):
     dossier = argv[1] if len(argv) > 1 else "ics"
-    voulus = lire_liste(os.environ.get("TIMETREE_CALENDRIERS"))
+    variable = lire_liste(os.environ.get("TIMETREE_CALENDRIERS"))
+    regie = personnes_de_la_regie()
+    env_regie = None
+    if regie is not None:
+        personnes, env_regie = regie
+        voulus = [(n, r) for n, r in variable if r == "concours"] + personnes
+    else:
+        voulus = variable
     if not voulus:
         code = os.environ.get("TIMETREE_CALENDAR_CODE")
         voulus = [("#" + code, "concours")] if code else []
@@ -58,7 +92,11 @@ def main(argv):
             trouves = [m for m in actifs if normaliser(m.get("name")) == normaliser(nom)]
         if not trouves:
             manquants.append(nom if not nom.startswith("#") else "(calendrier par code)")
+            if env_regie and role != "concours":
+                noter_calendrier(env_regie, role, False)
             continue
+        if env_regie and role != "concours":
+            noter_calendrier(env_regie, role, True)
         fichier = "%02d.ics" % (len(index) + 1)
         Exporter(Calendar(api, trouves[0]), os.path.join(dossier, fichier)).export()
         with open(os.path.join(dossier, fichier), "rb") as f:
