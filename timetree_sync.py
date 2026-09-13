@@ -245,8 +245,8 @@ def synchroniser(env, texte, essai):
         passe = tout_lire(env, "evenements?select=client_id,lieu,date_debut&timetree_uid=is.null")
         existants = {e["timetree_uid"]: e for e in tout_lire(env,
             "evenements?select=id,timetree_uid,titre,titre_agenda,cle_agenda,date_debut,date_fin,lieu,client_id,"
-            "client_devine,corrige_le,retire_agenda_le&timetree_uid=not.is.null")}
-        regles = {r["cle"]: r for r in tout_lire(env, "regles_agenda?select=cle,client_id,lieu")}
+            "client_devine,corrige_le,retire_agenda_le&timetree_uid=not.is.null&source=eq.timetree")}
+        regles = {r["cle"]: r for r in tout_lire(env, "regles_agenda?select=cle,client_id,lieu,nature") if r.get("nature", "concours") == "concours"}
     except urllib.error.HTTPError as e:
         if not essai:
             raise
@@ -376,6 +376,11 @@ def synchroniser_personnes(env, personnes, essai):
         print("(migration 0049 pas encore passée : essai sans affectations existantes)")
         existantes = []
 
+    try:
+        regles_toutes = {r["cle"]: r.get("nature") or "concours"
+                         for r in tout_lire(env, "regles_agenda?select=cle,nature")}
+    except urllib.error.HTTPError:
+        regles_toutes = {}
     resume = []
     for nom, texte in personnes:
         stricte = normaliser(nom) == "julien"
@@ -395,6 +400,25 @@ def synchroniser_personnes(env, personnes, essai):
         # On ne retire que des affectations à venir : l'historique reste.
         perdues = [a for eid, a in deja.items() if eid not in a_garder
                    and ((a.get("evenements") or {}).get("date_fin") or (a.get("evenements") or {}).get("date_debut") or "") >= debut_fenetre]
+        # Calendrier privé : un événement de plusieurs jours qui ne tombe sur aucun
+        # concours connu est PROPOSÉ à Julien (ou décidé d'office si une règle existe).
+        propositions, auto = [], []
+        if stricte:
+            for p in items:
+                if (p["fin"] - p["debut"]).days < 1:
+                    continue
+                if any(rapprocher(p, [e], clients, False) for e in evenements):
+                    continue                     # déjà un concours à ces dates et à ce nom
+                cle = cle_agenda(p["titre"])
+                nature = regles_toutes.get(cle)
+                if nature == "ignorer":
+                    continue
+                ligne = {"uid": p["uid"], "cle": cle, "personne": nom, "titre": p["titre"],
+                         "date_debut": p["debut"].isoformat(), "date_fin": p["fin"].isoformat(),
+                         "lieu": p.get("location") or None}
+                (auto if nature == "concours" else propositions).append(ligne)
+            print("  %s : %d proposition(s) de concours, %d créé(s) d'après tes réponses passées"
+                  % (nom, len(propositions), len(auto)))
         for eid in sorted(a_garder, key=lambda i: trouves[i].get("date_debut") or ""):
             detail("  %s → %s %s" % (nom, trouves[eid].get("date_debut"), titres.get(eid)))
         print("  %s : %d journée(s) entière(s) à venir, %d aux dates d'un concours → %d concours rattaché(s) (%d nouveau(x), %d retiré(s))"
@@ -402,6 +426,15 @@ def synchroniser_personnes(env, personnes, essai):
         resume.append("%s %d" % (nom, len(a_garder)))
         if essai:
             continue
+        if propositions or auto:
+            # ignore-duplicates : une proposition déjà tranchée garde sa décision.
+            requete(env, "POST", "propositions_agenda?on_conflict=uid", propositions + auto,
+                    prefer="resolution=ignore-duplicates,return=minimal")
+            for ligne in auto:
+                prop = requete(env, "GET", "propositions_agenda?uid=eq.%s&select=id,decision"
+                               % urllib.parse.quote(ligne["uid"], safe=""))
+                if prop and prop[0].get("decision") is None:
+                    requete(env, "POST", "rpc/decider_proposition", {"p_id": prop[0]["id"], "p_concours": True})
         if nouvelles:
             requete(env, "POST", "affectations?on_conflict=evenement_id,personne",
                     [{"evenement_id": eid, "personne": nom} for eid in nouvelles],
