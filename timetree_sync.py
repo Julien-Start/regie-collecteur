@@ -35,7 +35,7 @@ EN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 def detail(texte):
     if not EN_CI:
         print(texte)
-FENETRE_PASSE = 1      # jours : le concours en cours reste visible
+FENETRE_PASSE = 400    # jours : la saison passée aussi, pour y relier factures et devis
 FENETRE_AVENIR = 548   # jours : un an et demi de saison
 
 # Mots d'un titre qui ne désignent pas un lieu (« Lamballe Top 7 », « CSI Montfort »).
@@ -285,7 +285,8 @@ def synchroniser(env, texte, essai):
         if not ex:
             ligne = dict(champs, timetree_uid=c["uid"], source="timetree", titre=c["titre"], lieu=lieu,
                          client_id=cid, client_devine=devine, activite_id=id_dclik,
-                         type_presta="captation_cso", statut="planifie")
+                         type_presta="captation_cso",
+                         statut="realise" if c["fin"] < aujourd_hui else "planifie")
             ligne["_appris"] = c["appris"]
             nouveaux.append(ligne)
             continue
@@ -380,7 +381,7 @@ def synchroniser_personnes(env, personnes, essai):
     clients = {c["id"]: c["nom"] for c in tout_lire(env, "clients?select=id,nom")}
     debut_fenetre = (aujourd_hui - timedelta(days=FENETRE_PASSE)).isoformat()
     evenements = tout_lire(env, "evenements?select=id,titre,titre_agenda,lieu,client_id,date_debut,date_fin"
-                                "&date_debut=gte.%s" % (aujourd_hui - timedelta(days=30)).isoformat())
+                                "&date_fin=gte.%s&source=neq.facture&supprime_le=is.null" % debut_fenetre)
     titres = {e["id"]: e.get("titre_agenda") or e.get("titre") for e in evenements}
     try:
         existantes = tout_lire(env, "affectations?select=id,evenement_id,personne,source,evenements(date_debut,date_fin)")
@@ -428,7 +429,7 @@ def synchroniser_personnes(env, personnes, essai):
         propositions, auto = [], []
         if stricte:
             for p in items:
-                if (p["fin"] - p["debut"]).days < 1:
+                if (p["fin"] - p["debut"]).days < 1 or p["fin"] < aujourd_hui:
                     continue
                 if any(rapprocher(p, [e], clients, False) for e in evenements):
                     continue                     # déjà un concours à ces dates et à ce nom

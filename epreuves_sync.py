@@ -64,7 +64,7 @@ def main():
     # Relier chaque numéro au concours de La Régie : mêmes dates, même endroit.
     clients = {c["id"]: c["nom"] for c in ts.tout_lire(env, "clients?select=id,nom")}
     evenements = ts.tout_lire(env, "evenements?select=id,titre,titre_agenda,lieu,client_id,date_debut,date_fin,num_concours"
-                                   "&supprime_le=is.null&date_debut=gte.%s" % (date.today().replace(year=date.today().year - 1)).isoformat())
+                                   "&supprime_le=is.null&source=neq.facture&date_debut=gte.%s" % (date.today().replace(year=date.today().year - 1)).isoformat())
     relies = 0
     for num, e in concours.items():
         if any(ev.get("num_concours") == num for ev in evenements) or not e["date_debut"]:
