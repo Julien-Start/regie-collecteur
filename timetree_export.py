@@ -121,7 +121,9 @@ def main(argv):
         Exporter(Calendar(api, trouves[0]), os.path.join(dossier, fichier)).export()
         with open(os.path.join(dossier, fichier), "rb") as f:
             n = f.read().count(b"BEGIN:VEVENT")
-        index[fichier] = role
+        # Le nom réel du calendrier sert à agenda_events (calendrier unifié) ; le rôle
+        # reste celui du sync concours. Ancien format (une chaîne) toujours accepté.
+        index[fichier] = {"role": role, "nom": trouves[0].get("name") or nom.lstrip("#")}
         print("Calendrier « %s » exporté · rôle : %s · %d événement(s)" % (
             trouves[0].get("name") if not nom.startswith("#") else "concours", role, n))
 

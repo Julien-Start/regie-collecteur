@@ -514,6 +514,98 @@ def synchroniser_personnes(env, personnes, essai):
     return "affectations : " + ", ".join(resume) if resume else ""
 
 
+# --------------------------------------------------------------------------- #
+# Calendrier unifié : TOUS les événements des agendas (agenda_events)          #
+# Le sync des concours ne garde que les journées entières de plusieurs jours ;  #
+# ici on garde tout (rendez-vous, états des lieux, perso), pour que La Régie     #
+# puisse afficher un vrai calendrier et y poser des événements.                 #
+# --------------------------------------------------------------------------- #
+AGENDA_PASSE = 400      # jours : ce qu'on garde derrière soi
+AGENDA_AVENIR = 550     # jours : et devant
+
+def _fuseau(nom):
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(nom)
+    except Exception:
+        return timezone.utc
+
+
+def moment_ics(prop):
+    """(instant ISO 8601, journée entière ?) d'un DTSTART/DTEND, ou (None, False)."""
+    if not prop:
+        return None, False
+    params, val = prop
+    val = val.strip()
+    if params.get("VALUE") == "DATE" or re.fullmatch(r"\d{8}", val):
+        d = datetime.strptime(val[:8], "%Y%m%d").date()
+        # journée entière : minuit UTC, comme ce que le collecteur écrit dans TimeTree
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).isoformat(), True
+    m = re.fullmatch(r"(\d{8})T(\d{6})(Z?)", val)
+    if not m:
+        return None, False
+    jour, heure, zoulou = m.groups()
+    brut = datetime.strptime(jour + heure, "%Y%m%d%H%M%S")
+    tz = timezone.utc if zoulou else _fuseau(params.get("TZID") or "Europe/Paris")
+    return brut.replace(tzinfo=tz).isoformat(), False
+
+
+def evenements_agenda(nom_calendrier, texte, aujourdhui=None):
+    """Les lignes agenda_events d'un calendrier, fenêtre de temps comprise."""
+    aujourdhui = aujourdhui or date.today()
+    debut_fenetre = (aujourdhui - timedelta(days=AGENDA_PASSE)).isoformat()
+    fin_fenetre = (aujourdhui + timedelta(days=AGENDA_AVENIR)).isoformat()
+    lignes = []
+    for ev in lire_ics(texte):
+        uid = (ev.get("UID") or (None, ""))[1].strip()
+        debut, journee = moment_ics(ev.get("DTSTART"))
+        if not uid or not debut:
+            continue
+        if not (debut_fenetre <= debut[:10] <= fin_fenetre):
+            continue
+        fin, _ = moment_ics(ev.get("DTEND"))
+        lieu = (ev.get("LOCATION") or (None, ""))[1].strip() or None
+        lignes.append({
+            "timetree_uid": uid,
+            "calendrier": nom_calendrier,
+            "titre": (ev.get("SUMMARY") or (None, ""))[1].strip() or "(sans titre)",
+            "debut": debut,
+            "fin": fin,
+            "journee": journee,
+            "lieu": lieu,
+            "source": "import",
+        })
+    return lignes
+
+
+def importer_agenda(env, calendriers, essai=False):
+    """Range dans agenda_events tout ce que les .ics contiennent, calendrier par calendrier,
+    puis oublie ce qui a disparu de TimeTree (purge par calendrier : un export raté
+    n'efface donc pas les événements des autres)."""
+    total, purges = 0, 0
+    for nom, texte in calendriers:
+        depart = datetime.now(timezone.utc).isoformat()
+        lignes = evenements_agenda(nom, texte)
+        for l in lignes:
+            l["vu_le"] = depart
+        if essai:
+            detail("agenda %s : %d événement(s) (essai)" % (nom, len(lignes)))
+            total += len(lignes)
+            continue
+        for i in range(0, len(lignes), 200):
+            requete(env, "POST", "agenda_events?on_conflict=timetree_uid", lignes[i:i + 200],
+                    prefer="resolution=merge-duplicates,return=minimal")
+        # Les 'planif' pas encore poussés n'ont pas d'uid et ne sont jamais touchés ici.
+        requete(env, "DELETE",
+                "agenda_events?source=eq.import&calendrier=eq.%s&vu_le=lt.%s"
+                % (urllib.parse.quote(nom, safe=""), urllib.parse.quote(depart, safe="")),
+                prefer="return=minimal")
+        total += len(lignes)
+        purges += 1
+    print("Calendrier unifié : %d événement(s) rangé(s) sur %d calendrier(s)." % (total, purges or len(calendriers)))
+    return total
+
+
 def main(argv):
     env = charger_env()
     if not env.get("SUPABASE_URL") or not env.get("SUPABASE_SERVICE_KEY"):
@@ -530,10 +622,14 @@ def main(argv):
     if os.path.isdir(argv[1]):
         index = json.load(open(os.path.join(argv[1], "index.json"), encoding="utf-8"))
         lire = lambda f: open(os.path.join(argv[1], f), encoding="utf-8").read()
-        concours = [lire(f) for f, role in index.items() if role == "concours"]
-        personnes = [(role, lire(f)) for f, role in index.items() if role != "concours"]
+        # index.json : {fichier: rôle} (ancien) ou {fichier: {"role":…, "nom":…}} (avec le
+        # nom du calendrier, pour le calendrier unifié).
+        fiches = {f: (v if isinstance(v, dict) else {"role": v, "nom": v}) for f, v in index.items()}
+        concours = [lire(f) for f, v in fiches.items() if v["role"] == "concours"]
+        personnes = [(v["role"], lire(f)) for f, v in fiches.items() if v["role"] != "concours"]
+        agendas = [(v.get("nom") or v["role"], lire(f)) for f, v in fiches.items()]
     else:
-        concours, personnes = [open(argv[1], encoding="utf-8").read()], []
+        concours, personnes, agendas = [open(argv[1], encoding="utf-8").read()], [], []
     try:
         nb, messages = 0, []
         for texte in concours:
@@ -545,6 +641,12 @@ def main(argv):
             msg = synchroniser_personnes(env, personnes, essai)
             if msg:
                 messages.append(msg)
+        if agendas:
+            # Le calendrier unifié ne doit jamais faire échouer la synchro des concours.
+            try:
+                importer_agenda(env, agendas, essai)
+            except Exception as err:
+                print("Calendrier unifié : %s" % str(err)[:200])
         if not essai:
             noter_synchro(env, True, " · ".join(messages), nb=nb)
             print("Synchronisé.")

@@ -62,6 +62,75 @@ def contenu(ev):
     return corps
 
 
+def iso_to_ms(iso):
+    """ISO 8601 (avec ou sans fuseau) -> millisecondes epoch. Sans fuseau : heure de Paris."""
+    t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        try:
+            from zoneinfo import ZoneInfo
+            t = t.replace(tzinfo=ZoneInfo("Europe/Paris"))
+        except Exception:
+            t = t.replace(tzinfo=timezone.utc)
+    return int(t.timestamp() * 1000)
+
+
+def contenu_agenda(row):
+    """Le corps d'un événement du calendrier unifié : journée entière ou horaire.
+    `creer()` ajoute category/attendees/alerts/recurrences/file_uuids : pas ici."""
+    corps = {"title": row["titre"]}
+    if row.get("lieu"):
+        corps["location"] = row["lieu"]
+    if row.get("journee", True):
+        # journée entière : minuit UTC du premier et du dernier jour, comme contenu()
+        d0 = row["debut"][:10]
+        d1 = (row.get("fin") or row["debut"])[:10]
+        corps.update(all_day=True, start_at=minuit_utc_ms(d0), start_timezone="UTC",
+                     end_at=minuit_utc_ms(d1), end_timezone="UTC")
+    else:
+        debut = iso_to_ms(row["debut"])
+        fin = iso_to_ms(row["fin"]) if row.get("fin") else debut + 3600 * 1000
+        corps.update(all_day=False, start_at=debut, start_timezone="Europe/Paris",
+                     end_at=fin, end_timezone="Europe/Paris")
+    return corps
+
+
+def agenda_a_faire(env):
+    """Les événements planifiés à poser, et ceux à retirer de TimeTree."""
+    a_creer = ts.requete(env, "GET", "agenda_events?source=eq.planif&a_ecrire=eq.true"
+                                     "&timetree_uid=is.null&select=*&order=id") or []
+    a_retirer = ts.requete(env, "GET", "agenda_events?a_supprimer=eq.true"
+                                       "&timetree_uid=not.is.null&select=*&order=id") or []
+    return a_creer, a_retirer
+
+
+def agenda_pousser(tt, env, a_creer, a_retirer):
+    """Pose les événements planifiés dans le calendrier voulu, retire ceux à supprimer.
+    Une erreur sur une ligne n'arrête pas les autres : elle est notée dans sa catégorie."""
+    faits = echecs = 0
+    for row in a_creer:
+        try:
+            uuid = tt.creer(tt.calendrier(row["calendrier"]), contenu_agenda(row))
+            ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
+                       {"timetree_uid": uuid, "a_ecrire": False}, prefer="return=minimal")
+            faits += 1
+        except Exception as err:
+            ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
+                       {"a_ecrire": False, "categorie": ("erreur : " + str(err))[:120]}, prefer="return=minimal")
+            echecs += 1
+    for row in a_retirer:
+        try:
+            tt.supprimer(tt.calendrier(row["calendrier"]), row["timetree_uid"])
+            ts.requete(env, "DELETE", "agenda_events?id=eq.%s" % row["id"], prefer="return=minimal")
+            faits += 1
+        except Exception as err:
+            ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
+                       {"a_supprimer": False, "categorie": ("erreur : " + str(err))[:120]}, prefer="return=minimal")
+            echecs += 1
+    if faits or echecs:
+        print("Calendrier unifié : %d événement(s) posé(s) ou retiré(s), %d en échec" % (faits, echecs))
+    return faits, echecs
+
+
 class TimeTree:
     def __init__(self):
         session_id = login(os.environ["TIMETREE_EMAIL"], os.environ["TIMETREE_PASSWORD"])
@@ -143,15 +212,25 @@ def main():
     env = ts.charger_env()
     attente = ts.requete(env, "GET", "ecritures_timetree?statut=eq.a_envoyer"
                                      "&select=id,evenement_id,action,personne,tentatives&order=id") or []
-    if not attente:
+    # Le calendrier unifié : événements planifiés dans La Régie, à poser ou à retirer.
+    try:
+        agenda_creer, agenda_retirer = agenda_a_faire(env)
+    except Exception as err:
+        agenda_creer, agenda_retirer = [], []
+        print("Calendrier unifié illisible : %s" % str(err)[:200])
+    if not attente and not agenda_creer and not agenda_retirer:
         print("Rien à écrire dans TimeTree.")
-        return 0
-    nom_concours = nom_calendrier_concours()
-    if not nom_concours:
-        print("Aucun calendrier « concours » déclaré : rien n'est écrit.")
         return 0
 
     tt = TimeTree()
+    if agenda_creer or agenda_retirer:
+        agenda_pousser(tt, env, agenda_creer, agenda_retirer)
+    if not attente:
+        return 0
+    nom_concours = nom_calendrier_concours()
+    if not nom_concours:
+        print("Aucun calendrier « concours » déclaré : les concours ne sont pas écrits.")
+        return 0
     cal_concours = tt.calendrier(nom_concours)
     # Étiquettes de « D'clik agency » par leur NOM (SHF, DCK) ; repli sur la couleur
     # si l'une d'elles a été renommée. A VALIDER n'est jamais écrasée.
