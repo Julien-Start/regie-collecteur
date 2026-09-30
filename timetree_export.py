@@ -88,7 +88,11 @@ def main(argv):
     env_regie = None
     if regie is not None:
         personnes, env_regie = regie
-        voulus = [(n, r) for n, r in variable if r == "concours"] + personnes
+        # concours + personnes (source de vérité) + tout autre calendrier déclaré dans la
+        # variable qui n'est ni concours ni une personne (ex : Training, affichage seul).
+        deja = {normaliser(c) for c, _ in personnes}
+        extras = [(n, r) for n, r in variable if r != "concours" and normaliser(n) not in deja]
+        voulus = [(n, r) for n, r in variable if r == "concours"] + personnes + extras
     else:
         voulus = variable
     if not voulus:
@@ -100,10 +104,7 @@ def main(argv):
     os.makedirs(dossier, exist_ok=True)
 
     api = TimeTreeCalendar(login(os.environ["TIMETREE_EMAIL"], os.environ["TIMETREE_PASSWORD"]))
-    _tous = api.get_metadata()
-    print("DEBUG calendriers du compte : " + " | ".join(
-        "%s%s" % (m.get("name") or "?", " [désactivé]" if m.get("deactivated_at") else "") for m in _tous))
-    actifs = [m for m in _tous if m.get("deactivated_at") is None]
+    actifs = [m for m in api.get_metadata() if m.get("deactivated_at") is None]
 
     index, manquants = {}, []
     for nom, role in voulus:
