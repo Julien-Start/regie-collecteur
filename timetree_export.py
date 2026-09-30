@@ -100,7 +100,10 @@ def main(argv):
     os.makedirs(dossier, exist_ok=True)
 
     api = TimeTreeCalendar(login(os.environ["TIMETREE_EMAIL"], os.environ["TIMETREE_PASSWORD"]))
-    actifs = [m for m in api.get_metadata() if m.get("deactivated_at") is None]
+    _tous = api.get_metadata()
+    print("DEBUG calendriers du compte : " + " | ".join(
+        "%s%s" % (m.get("name") or "?", " [désactivé]" if m.get("deactivated_at") else "") for m in _tous))
+    actifs = [m for m in _tous if m.get("deactivated_at") is None]
 
     index, manquants = {}, []
     for nom, role in voulus:
