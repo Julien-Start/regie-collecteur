@@ -41,7 +41,7 @@ jobs:
             echo "Secrets TimeTree absents : rien à synchroniser."
             exit 0
           fi
-          python -m pip install --quiet timetree-exporter
+          python -m pip install --quiet timetree-exporter python-dateutil
           python -m pip show timetree-exporter | grep -i '^version' || true
           # Filet de sécurité : ce que La Régie n'aurait pas encore réussi à écrire.
           python timetree_ecrire.py || true

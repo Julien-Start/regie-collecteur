@@ -154,6 +154,9 @@ def lire_ics(texte):
                     params[k.upper()] = v
             if nom not in courant:
                 courant[nom] = (params, val)
+            # EXDATE (et compagnie) peuvent revenir plusieurs fois : on garde tout,
+            # sans changer ce que voient les lecteurs d'une seule valeur.
+            courant.setdefault("_TOUTES", {}).setdefault(nom, []).append((params, val))
     return evenements
 
 
@@ -550,6 +553,59 @@ def moment_ics(prop):
     return brut.replace(tzinfo=tz).isoformat(), False
 
 
+RECURRENCE_FIN = date(2027, 7, 31)   # jusqu'où on déplie (vue calendrier + judo 2026-2027)
+RECURRENCE_PASSE = 90                # jours dépliés derrière soi
+RECURRENCE_MAX = 500                 # plafond de sécurité par événement récurrent
+
+
+def _dates_exclues(ev):
+    """Les dates d'EXDATE (occurrences supprimées dans TimeTree), en 'AAAA-MM-JJ'."""
+    exclues = set()
+    for params, val in (ev.get("_TOUTES") or {}).get("EXDATE", []):
+        for morceau in val.split(","):
+            iso, _ = moment_ics((params, morceau))
+            if iso:
+                exclues.add(iso[:10])
+    return exclues
+
+
+def _rrule_propre(valeur):
+    """UNTIL sans heure ni fuseau (« UNTIL=20261231 », écrit ainsi par TimeTree) :
+    dateutil le refuse quand le départ porte un fuseau. On le passe en UTC, fin de journée."""
+    def corriger(m):
+        val = m.group(1)
+        if re.fullmatch(r"\d{8}", val):
+            return "UNTIL=" + val + "T235959Z"
+        if re.fullmatch(r"\d{8}T\d{6}", val):
+            return "UNTIL=" + val + "Z"
+        return m.group(0)
+    return re.sub(r"UNTIL=([0-9TZ]+)", corriger, valeur, flags=re.I)
+
+
+def deplier_recurrence(ev, debut_iso, aujourdhui):
+    """Les débuts de chaque occurrence d'un événement récurrent, ou None si l'ICS n'en dit rien.
+    Renvoie une liste d'ISO 8601 (le premier élément est l'occurrence d'origine)."""
+    regle = ev.get("RRULE")
+    if not regle:
+        return None
+    try:
+        from dateutil.rrule import rrulestr
+    except ImportError:
+        print("Récurrences non dépliées : python-dateutil n'est pas installé.")
+        return None
+    depart = datetime.fromisoformat(debut_iso)
+    borne_debut = datetime.combine(aujourdhui - timedelta(days=RECURRENCE_PASSE), datetime.min.time(), depart.tzinfo)
+    borne_fin = datetime.combine(RECURRENCE_FIN, datetime.max.time(), depart.tzinfo)
+    try:
+        regles = rrulestr(_rrule_propre(regle[1].strip()), dtstart=depart)
+        occurrences = list(regles.between(borne_debut, borne_fin, inc=True))[:RECURRENCE_MAX]
+    except Exception as err:
+        detail("RRULE illisible (%s) : %s" % (str(err)[:60], regle[1][:60]))
+        return None
+    exclues = _dates_exclues(ev)
+    return [o.isoformat() for o in occurrences if o.date().isoformat() not in exclues]
+
+
 def evenements_agenda(nom_calendrier, texte, aujourdhui=None):
     """Les lignes agenda_events d'un calendrier, fenêtre de temps comprise."""
     aujourdhui = aujourdhui or date.today()
@@ -561,20 +617,32 @@ def evenements_agenda(nom_calendrier, texte, aujourdhui=None):
         debut, journee = moment_ics(ev.get("DTSTART"))
         if not uid or not debut:
             continue
-        if not (debut_fenetre <= debut[:10] <= fin_fenetre):
+        # Un récurrent commencé il y a deux ans compte quand même : ses occurrences
+        # d'aujourd'hui sont dans la fenêtre. La fenêtre s'applique donc plus bas.
+        if not ev.get("RRULE") and not (debut_fenetre <= debut[:10] <= fin_fenetre):
             continue
         fin, _ = moment_ics(ev.get("DTEND"))
         lieu = (ev.get("LOCATION") or (None, ""))[1].strip() or None
-        lignes.append({
-            "timetree_uid": uid,
-            "calendrier": nom_calendrier,
-            "titre": (ev.get("SUMMARY") or (None, ""))[1].strip() or "(sans titre)",
-            "debut": debut,
-            "fin": fin,
-            "journee": journee,
-            "lieu": lieu,
-            "source": "import",
-        })
+        titre = (ev.get("SUMMARY") or (None, ""))[1].strip() or "(sans titre)"
+        duree = (datetime.fromisoformat(fin) - datetime.fromisoformat(debut)) if fin else None
+        # Un événement récurrent (garde, entraînement…) vaut une ligne par occurrence :
+        # sans ça, l'agenda n'en montrerait qu'une, et l'upsert par uid écraserait les autres.
+        occurrences = deplier_recurrence(ev, debut, aujourdhui)
+        for depart in (occurrences if occurrences is not None else [debut]):
+            if not (debut_fenetre <= depart[:10] <= fin_fenetre):
+                continue
+            arrivee = (datetime.fromisoformat(depart) + duree).isoformat() if duree else None
+            lignes.append({
+                # chaque occurrence a son propre identifiant, dérivé de celui du maître
+                "timetree_uid": uid if occurrences is None else "%s#%s" % (uid, depart[:10]),
+                "calendrier": nom_calendrier,
+                "titre": titre,
+                "debut": depart,
+                "fin": arrivee if occurrences is not None else fin,
+                "journee": journee,
+                "lieu": lieu,
+                "source": "import",
+            })
     return lignes
 
 

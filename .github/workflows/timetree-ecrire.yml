@@ -31,7 +31,7 @@ jobs:
             echo "Secrets TimeTree absents : rien à écrire."
             exit 0
           fi
-          python -m pip install --quiet timetree-exporter
+          python -m pip install --quiet timetree-exporter python-dateutil
           python timetree_ecrire.py
           if python timetree_export.py ics > export.log 2>&1; then
             cat export.log

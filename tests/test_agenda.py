@@ -122,6 +122,91 @@ class Lecture(unittest.TestCase):
         self.assertIn("vu_le=lt.", suppr[0][1])
 
 
+class Recurrences(unittest.TestCase):
+    """Un récurrent (garde, entraînement) vaut une ligne par occurrence."""
+    AUJOURDHUI = date(2026, 10, 1)
+
+    def ics(self, corps):
+        return "BEGIN:VCALENDAR\n" + corps + "\nEND:VCALENDAR\n"
+
+    def test_bihebdo(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:garde
+SUMMARY:Garde
+DTSTART;VALUE=DATE:20260904
+DTEND;VALUE=DATE:20260911
+RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231
+END:VEVENT""")
+        lignes = ts.evenements_agenda("Privé", texte, self.AUJOURDHUI)
+        debuts = sorted(l["debut"][:10] for l in lignes)
+        self.assertGreater(len(lignes), 4, "la garde revient toutes les deux semaines")
+        self.assertIn("2026-10-02", debuts)
+        self.assertIn("2026-10-16", debuts)
+        self.assertNotIn("2026-10-09", debuts, "une semaine sur deux seulement")
+        self.assertEqual(len(set(l["timetree_uid"] for l in lignes)), len(lignes), "un identifiant par occurrence")
+        self.assertTrue(all(l["timetree_uid"].startswith("garde#") for l in lignes))
+
+    def test_duree_conservee(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:garde
+SUMMARY:Garde
+DTSTART;VALUE=DATE:20260904
+DTEND;VALUE=DATE:20260911
+RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=3
+END:VEVENT""")
+        for l in ts.evenements_agenda("Privé", texte, self.AUJOURDHUI):
+            jours = (datetime.fromisoformat(l["fin"]) - datetime.fromisoformat(l["debut"])).days
+            self.assertEqual(jours, 7, "une semaine de garde reste une semaine")
+
+    def test_exdate_exclue(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:judo
+SUMMARY:Judo
+DTSTART;TZID=Europe/Paris:20261007T163000
+DTEND;TZID=Europe/Paris:20261007T181500
+RRULE:FREQ=WEEKLY;COUNT=4
+EXDATE;TZID=Europe/Paris:20261014T163000
+END:VEVENT""")
+        lignes = ts.evenements_agenda("Privé", texte, self.AUJOURDHUI)
+        jours = sorted(l["debut"][:10] for l in lignes)
+        self.assertEqual(jours, ["2026-10-07", "2026-10-21", "2026-10-28"])
+        self.assertFalse(lignes[0]["journee"])
+        self.assertIn("T16:30:00", lignes[0]["debut"])
+
+    def test_sans_rrule_une_seule_ligne(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:simple
+SUMMARY:RDV
+DTSTART;VALUE=DATE:20261005
+END:VEVENT""")
+        lignes = ts.evenements_agenda("Privé", texte, self.AUJOURDHUI)
+        self.assertEqual(len(lignes), 1)
+        self.assertEqual(lignes[0]["timetree_uid"], "simple", "pas d'identifiant dérivé sans récurrence")
+
+    def test_plafond(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:quotidien
+SUMMARY:Rappel
+DTSTART;TZID=Europe/Paris:20260101T080000
+RRULE:FREQ=DAILY
+END:VEVENT""")
+        lignes = ts.evenements_agenda("Privé", texte, self.AUJOURDHUI)
+        self.assertLessEqual(len(lignes), ts.RECURRENCE_MAX, "un quotidien sans fin ne remplit pas la base")
+        self.assertGreater(len(lignes), 100)
+
+    def test_recurrent_ancien_compte_quand_meme(self):
+        texte = self.ics("""BEGIN:VEVENT
+UID:vieux
+SUMMARY:Entraînement
+DTSTART;TZID=Europe/Paris:20240110T180000
+DTEND;TZID=Europe/Paris:20240110T193000
+RRULE:FREQ=WEEKLY
+END:VEVENT""")
+        lignes = ts.evenements_agenda("Privé", texte, self.AUJOURDHUI)
+        self.assertTrue(lignes, "un récurrent commencé en 2024 a des occurrences aujourd'hui")
+        self.assertTrue(all(l["debut"][:10] >= "2026-07-03" for l in lignes))
+
+
 class Corps(unittest.TestCase):
     def test_journee_entiere_minuit_utc(self):
         corps = te.contenu_agenda({"titre": "Dépôt écran", "debut": "2026-10-13T00:00:00+00:00",
