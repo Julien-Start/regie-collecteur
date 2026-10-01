@@ -205,14 +205,27 @@ def concours_de_l_agenda(texte, aujourd_hui, horaires=False):
         else:
             fin_excl, _ = _date(ev.get("DTEND"))
             fin = (fin_excl - timedelta(days=1)) if fin_excl and fin_excl > debut else debut
-        if fin < aujourd_hui - timedelta(days=FENETRE_PASSE) or debut > aujourd_hui + timedelta(days=FENETRE_AVENIR):
-            continue
         uid = ev.get("UID", ({}, ""))[1].strip() or hashlib.sha1((titre + debut.isoformat()).encode()).hexdigest()
         brutes = [c.strip() for c in _valeur(ev.get("CATEGORIES", ({}, ""))[1]).split(",") if c.strip()]
         cats = [normaliser(c) for c in brutes]
         lieu = _valeur(ev.get("LOCATION", ({}, ""))[1]).strip()
         couleur = ev.get("COLOR", ({}, ""))[1].strip()
-        retenus.append({"uid": uid, "titre": titre, "debut": debut, "fin": fin, "categories": cats, "etiquette": brutes[0] if brutes else None, "couleur": couleur, "location": lieu, "horaire": horaire})
+        duree = fin - debut                      # span conservé pour chaque occurrence
+        # Un concours récurrent (diffusion annuelle, prestation qui revient chaque saison…)
+        # vaut une occurrence par date : sans ça la Saison ne verrait que la première année,
+        # et le rappel « refaire la facture l'an prochain » manquerait. Même moteur que le
+        # calendrier unifié (déplié jusqu'à RECURRENCE_FIN, EXDATE respectés).
+        depart_iso = datetime(debut.year, debut.month, debut.day, tzinfo=timezone.utc).isoformat()
+        occurrences = deplier_recurrence(ev, depart_iso, aujourd_hui)
+        for dep in (occurrences if occurrences is not None else [depart_iso]):
+            d0 = datetime.fromisoformat(dep).date()
+            d1 = d0 + duree
+            if d1 < aujourd_hui - timedelta(days=FENETRE_PASSE) or d0 > aujourd_hui + timedelta(days=FENETRE_AVENIR):
+                continue
+            occ_uid = uid if occurrences is None else "%s#%s" % (uid, dep[:10])
+            retenus.append({"uid": occ_uid, "titre": titre, "debut": d0, "fin": d1, "categories": cats,
+                            "etiquette": brutes[0] if brutes else None, "couleur": couleur,
+                            "location": lieu, "horaire": horaire})
     return retenus, ecartes
 
 
