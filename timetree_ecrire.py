@@ -17,7 +17,7 @@
 # Seuls titre, dates et lieu sont écrits. Chaque écriture envoie l'état COURANT.
 # Journal public (dépôt public) : aucun titre, aucune date, aucun identifiant.
 import os, re, sys, json, colorsys, unicodedata
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 
 import requests
 from timetree_exporter.api.auth import login
@@ -81,9 +81,16 @@ def contenu_agenda(row):
     if row.get("lieu"):
         corps["location"] = row["lieu"]
     if row.get("journee", True):
-        # journée entière : minuit UTC du premier et du dernier jour, comme contenu()
+        # journée entière : minuit UTC du premier et du dernier jour, comme contenu().
+        # En base, fin = fin EXCLUSIVE (lendemain du dernier jour, comme l'import) ; TimeTree
+        # veut le dernier jour INCLUS → on retranche un jour. fin absente = un seul jour.
         d0 = row["debut"][:10]
-        d1 = (row.get("fin") or row["debut"])[:10]
+        if row.get("fin"):
+            d1 = (date.fromisoformat(row["fin"][:10]) - timedelta(days=1)).isoformat()
+            if d1 < d0:
+                d1 = d0
+        else:
+            d1 = d0
         corps.update(all_day=True, start_at=minuit_utc_ms(d0), start_timezone="UTC",
                      end_at=minuit_utc_ms(d1), end_timezone="UTC")
     else:
