@@ -102,17 +102,33 @@ def contenu_agenda(row):
 
 
 def agenda_a_faire(env):
-    """Les événements planifiés à poser, et ceux à retirer de TimeTree."""
-    a_creer = ts.requete(env, "GET", "agenda_events?source=eq.planif&a_ecrire=eq.true"
+    """Les événements à poser, à modifier sur place, et ceux à retirer de TimeTree.
+    À poser : planifiés dans La Régie (planif) ou découlant d'une règle (regle, ex. judo).
+    À modifier : déjà dans TimeTree (uid connu) et changés dans La Régie (a_ecrire)."""
+    a_creer = ts.requete(env, "GET", "agenda_events?source=in.(planif,regle)&a_ecrire=eq.true"
                                      "&timetree_uid=is.null&select=*&order=id") or []
+    a_modifier = ts.requete(env, "GET", "agenda_events?a_ecrire=eq.true&a_supprimer=eq.false"
+                                        "&timetree_uid=not.is.null&select=*&order=id") or []
     a_retirer = ts.requete(env, "GET", "agenda_events?a_supprimer=eq.true"
                                        "&timetree_uid=not.is.null&select=*&order=id") or []
-    return a_creer, a_retirer
+    return a_creer, a_modifier, a_retirer
 
 
-def agenda_pousser(tt, env, a_creer, a_retirer):
-    """Pose les événements planifiés dans le calendrier voulu, retire ceux à supprimer.
-    Une erreur sur une ligne n'arrête pas les autres : elle est notée dans sa catégorie."""
+def _noter_echec(env, row, champ, err):
+    """Une erreur se note dans `categorie`, sauf pour un événement de règle (judo) :
+    sa catégorie est son identité, l'écraser ferait reposer un judo à chaque passage.
+    Celui-là reste à faire et sera retenté au passage suivant."""
+    if (row.get("categorie") or "").startswith("judo"):
+        print("Calendrier unifié : échec sur un événement de règle (%s), retenté au prochain passage" % str(err)[:80])
+        return
+    ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
+               {champ: False, "categorie": ("erreur : " + str(err))[:120]}, prefer="return=minimal")
+
+
+def agenda_pousser(tt, env, a_creer, a_retirer, a_modifier=()):
+    """Pose les événements planifiés dans le calendrier voulu, modifie sur place ceux qui
+    ont changé (même uid, l'événement reste le même dans TimeTree), retire ceux à supprimer.
+    Une erreur sur une ligne n'arrête pas les autres."""
     faits = echecs = 0
     for row in a_creer:
         try:
@@ -121,20 +137,36 @@ def agenda_pousser(tt, env, a_creer, a_retirer):
                        {"timetree_uid": uuid, "a_ecrire": False}, prefer="return=minimal")
             faits += 1
         except Exception as err:
+            _noter_echec(env, row, "a_ecrire", err)
+            echecs += 1
+    for row in a_modifier:
+        try:
+            if "#" in row["timetree_uid"]:
+                # occurrence dépliée d'une série : pas d'uuid TimeTree à elle seule
+                raise RuntimeError("occurrence d'une série, à modifier dans TimeTree")
+            tt.modifier(tt.calendrier(row["calendrier"]), row["timetree_uid"], contenu_agenda(row))
             ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
-                       {"a_ecrire": False, "categorie": ("erreur : " + str(err))[:120]}, prefer="return=minimal")
+                       {"a_ecrire": False}, prefer="return=minimal")
+            faits += 1
+        except Exception as err:
+            _noter_echec(env, row, "a_ecrire", err)
             echecs += 1
     for row in a_retirer:
         try:
             tt.supprimer(tt.calendrier(row["calendrier"]), row["timetree_uid"])
-            ts.requete(env, "DELETE", "agenda_events?id=eq.%s" % row["id"], prefer="return=minimal")
+            if row.get("categorie") == "judo":
+                # Supprimé par Julien : on garde la trace pour que la règle ne le repose pas.
+                ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
+                           {"categorie": "judo_annule", "timetree_uid": None, "a_supprimer": False,
+                            "source": "regle"}, prefer="return=minimal")
+            else:
+                ts.requete(env, "DELETE", "agenda_events?id=eq.%s" % row["id"], prefer="return=minimal")
             faits += 1
         except Exception as err:
-            ts.requete(env, "PATCH", "agenda_events?id=eq.%s" % row["id"],
-                       {"a_supprimer": False, "categorie": ("erreur : " + str(err))[:120]}, prefer="return=minimal")
+            _noter_echec(env, row, "a_supprimer", err)
             echecs += 1
     if faits or echecs:
-        print("Calendrier unifié : %d événement(s) posé(s) ou retiré(s), %d en échec" % (faits, echecs))
+        print("Calendrier unifié : %d événement(s) posé(s), modifié(s) ou retiré(s), %d en échec" % (faits, echecs))
     return faits, echecs
 
 
@@ -221,17 +253,17 @@ def main():
                                      "&select=id,evenement_id,action,personne,tentatives&order=id") or []
     # Le calendrier unifié : événements planifiés dans La Régie, à poser ou à retirer.
     try:
-        agenda_creer, agenda_retirer = agenda_a_faire(env)
+        agenda_creer, agenda_modifier, agenda_retirer = agenda_a_faire(env)
     except Exception as err:
-        agenda_creer, agenda_retirer = [], []
+        agenda_creer, agenda_modifier, agenda_retirer = [], [], []
         print("Calendrier unifié illisible : %s" % str(err)[:200])
-    if not attente and not agenda_creer and not agenda_retirer:
+    if not attente and not agenda_creer and not agenda_modifier and not agenda_retirer:
         print("Rien à écrire dans TimeTree.")
         return 0
 
     tt = TimeTree()
-    if agenda_creer or agenda_retirer:
-        agenda_pousser(tt, env, agenda_creer, agenda_retirer)
+    if agenda_creer or agenda_modifier or agenda_retirer:
+        agenda_pousser(tt, env, agenda_creer, agenda_retirer, agenda_modifier)
     if not attente:
         return 0
     nom_concours = nom_calendrier_concours()

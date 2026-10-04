@@ -624,12 +624,31 @@ def evenements_agenda(nom_calendrier, texte, aujourdhui=None):
     aujourdhui = aujourdhui or date.today()
     debut_fenetre = (aujourdhui - timedelta(days=AGENDA_PASSE)).isoformat()
     fin_fenetre = (aujourdhui + timedelta(days=AGENDA_AVENIR)).isoformat()
+    evenements = lire_ics(texte)
+    # Une occurrence déplacée ou supprimée dans TimeTree (une semaine de garde décalée)
+    # revient comme un VEVENT à part, avec le même UID et un RECURRENCE-ID qui désigne la
+    # date d'origine. Le maître ne doit plus produire cette date : sinon doublon.
+    remplacees = {}
+    for ev in evenements:
+        if ev.get("RECURRENCE-ID"):
+            uid = (ev.get("UID") or (None, ""))[1].strip()
+            origine, _ = moment_ics(ev.get("RECURRENCE-ID"))
+            if uid and origine:
+                remplacees.setdefault(uid, set()).add(origine[:10])
     lignes = []
-    for ev in lire_ics(texte):
+    for ev in evenements:
         uid = (ev.get("UID") or (None, ""))[1].strip()
         debut, journee = moment_ics(ev.get("DTSTART"))
         if not uid or not debut:
             continue
+        if ev.get("RECURRENCE-ID"):
+            # L'occurrence modifiée garde la clé qu'aurait eue l'occurrence d'origine (uid#date),
+            # pour que la ligne en base soit mise à jour au lieu d'être doublée.
+            if (ev.get("STATUS") or (None, ""))[1].strip().upper() == "CANCELLED":
+                continue
+            origine, _ = moment_ics(ev.get("RECURRENCE-ID"))
+            uid = "%s#%s" % (uid, origine[:10])
+            ev = {k: v for k, v in ev.items() if k != "RRULE"}
         # Un récurrent commencé il y a deux ans compte quand même : ses occurrences
         # d'aujourd'hui sont dans la fenêtre. La fenêtre s'applique donc plus bas.
         if not ev.get("RRULE") and not (debut_fenetre <= debut[:10] <= fin_fenetre):
@@ -643,6 +662,8 @@ def evenements_agenda(nom_calendrier, texte, aujourdhui=None):
         occurrences = deplier_recurrence(ev, debut, aujourdhui)
         for depart in (occurrences if occurrences is not None else [debut]):
             if not (debut_fenetre <= depart[:10] <= fin_fenetre):
+                continue
+            if occurrences is not None and depart[:10] in remplacees.get(uid, ()):
                 continue
             arrivee = (datetime.fromisoformat(depart) + duree).isoformat() if duree else None
             lignes.append({

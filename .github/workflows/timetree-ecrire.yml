@@ -36,6 +36,8 @@ jobs:
           if python timetree_export.py ics > export.log 2>&1; then
             cat export.log
             python timetree_sync.py ics
+            # Le judo suit la garde fraîchement relue : poser / retirer, puis écrire tout de suite.
+            python regles_agenda.py && python timetree_ecrire.py || true
           fi
           # L'ordre des épreuves (Concours_DCK.csv, lien Dropbox) : ne bloque jamais le passage.
           python epreuves_sync.py || true

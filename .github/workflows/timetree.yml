@@ -50,6 +50,8 @@ jobs:
           if python timetree_export.py ics > export.log 2>&1; then
             cat export.log
             python timetree_sync.py ics
+            # Le judo suit la garde fraîchement relue : poser / retirer, puis écrire tout de suite.
+            python regles_agenda.py && python timetree_ecrire.py || true
           else
             MSG="Export TimeTree en échec : $(tail -n 3 export.log | tr '\n' ' ' | cut -c1-300)"
             # Ce message part en base et s'affiche dans le radar, où GitHub ne masque rien :

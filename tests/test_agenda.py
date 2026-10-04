@@ -83,6 +83,9 @@ class FauxTimeTree:
     def supprimer(self, cal_id, uuid):
         self.supprimes.append((cal_id, uuid))
 
+    def modifier(self, cal_id, uuid, corps):
+        self.modifies = getattr(self, "modifies", []) + [(cal_id, uuid, corps)]
+
 
 class Lecture(unittest.TestCase):
     def test_journee_et_horaire(self):
@@ -214,7 +217,8 @@ class Corps(unittest.TestCase):
         self.assertTrue(corps["all_day"])
         self.assertEqual(corps["start_timezone"], "UTC")
         self.assertEqual(corps["start_at"], te.minuit_utc_ms("2026-10-13"))
-        self.assertEqual(corps["end_at"], te.minuit_utc_ms("2026-10-14"))
+        # fin en base = fin EXCLUSIVE (lendemain) ; TimeTree veut le dernier jour inclus
+        self.assertEqual(corps["end_at"], te.minuit_utc_ms("2026-10-13"))
         self.assertEqual(corps["location"], "Le Lion")
         for interdit in ("category", "attendees", "alerts", "recurrences", "file_uuids"):
             self.assertNotIn(interdit, corps, "creer() les ajoute déjà")
@@ -229,13 +233,13 @@ class Corps(unittest.TestCase):
 
 
 class Ecriture(unittest.TestCase):
-    def lancer(self, a_creer, a_retirer, calendriers):
+    def lancer(self, a_creer, a_retirer, calendriers, a_modifier=()):
         faux = FausseRegie()
         tt = FauxTimeTree(calendriers)
         ancien = te.ts.requete
         te.ts.requete = faux.requete
         try:
-            te.agenda_pousser(tt, {}, a_creer, a_retirer)
+            te.agenda_pousser(tt, {}, a_creer, a_retirer, a_modifier)
         finally:
             te.ts.requete = ancien
         return faux, tt
@@ -267,15 +271,146 @@ class Ecriture(unittest.TestCase):
         self.assertIn(("DELETE", "agenda_events?id=eq.9", None), faux.appels)
 
     def test_files_lues(self):
-        faux = FausseRegie({"source=eq.planif": [{"id": 1}], "a_supprimer=eq.true": [{"id": 2}]})
+        faux = FausseRegie({"source=in.(planif,regle)": [{"id": 1}], "a_supprimer=eq.false": [{"id": 3}],
+                            "a_supprimer=eq.true": [{"id": 2}]})
         ancien = te.ts.requete
         te.ts.requete = faux.requete
         try:
-            a_creer, a_retirer = te.agenda_a_faire({})
+            a_creer, a_modifier, a_retirer = te.agenda_a_faire({})
         finally:
             te.ts.requete = ancien
         self.assertEqual(a_creer, [{"id": 1}])
+        self.assertEqual(a_modifier, [{"id": 3}])
         self.assertEqual(a_retirer, [{"id": 2}])
+
+    def test_modification_sur_place(self):
+        ligne = {"id": 11, "calendrier": "Privé", "timetree_uid": "u-7", "titre": "RDV déplacé",
+                 "journee": False, "debut": "2026-10-13T17:00:00+02:00", "fin": "2026-10-13T18:00:00+02:00"}
+        faux, tt = self.lancer([], [], {"Privé": "cal-prive"}, [ligne])
+        self.assertEqual(tt.crees, [], "on ne recrée pas")
+        self.assertEqual(tt.supprimes, [], "on ne supprime pas")
+        self.assertEqual(tt.modifies[0][:2], ("cal-prive", "u-7"), "même uid")
+        self.assertEqual(tt.modifies[0][2]["title"], "RDV déplacé")
+        self.assertIn(("PATCH", "agenda_events?id=eq.11", {"a_ecrire": False}), faux.appels)
+
+    def test_occurrence_de_serie_non_modifiable(self):
+        ligne = {"id": 12, "calendrier": "Privé", "timetree_uid": "garde#2026-10-09", "titre": "X",
+                 "journee": True, "debut": "2026-10-09T00:00:00+00:00"}
+        faux, tt = self.lancer([], [], {"Privé": "cal-prive"}, [ligne])
+        self.assertFalse(getattr(tt, "modifies", []))
+        patch = [a for a in faux.appels if a[0] == "PATCH"][0]
+        self.assertIn("série", patch[2]["categorie"])
+
+    def test_judo_supprime_par_julien_reste_annule(self):
+        ligne = {"id": 13, "calendrier": "Privé", "timetree_uid": "u-j", "titre": "🥋 Judo", "categorie": "judo",
+                 "journee": False, "debut": "2026-10-07T16:30:00+02:00"}
+        faux, tt = self.lancer([], [ligne], {"Privé": "cal-prive"})
+        self.assertEqual(tt.supprimes, [("cal-prive", "u-j")])
+        self.assertFalse(any(a[0] == "DELETE" for a in faux.appels), "la ligne reste, comme exclusion")
+        patch = [a for a in faux.appels if a[0] == "PATCH"][0]
+        self.assertEqual(patch[2]["categorie"], "judo_annule")
+        self.assertIsNone(patch[2]["timetree_uid"])
+        self.assertEqual(patch[2]["source"], "regle", "jamais purgé par l'import")
+
+    def test_judo_retire_par_la_regle_disparait(self):
+        ligne = {"id": 14, "calendrier": "Privé", "timetree_uid": "u-k", "titre": "🥋 Judo", "categorie": "judo_retire",
+                 "journee": False, "debut": "2026-10-07T16:30:00+02:00"}
+        faux, tt = self.lancer([], [ligne], {"Privé": "cal-prive"})
+        self.assertIn(("DELETE", "agenda_events?id=eq.14", None), faux.appels)
+
+    def test_echec_sur_judo_garde_sa_categorie(self):
+        ligne = {"id": 15, "calendrier": "Inconnu", "titre": "🥋 Judo", "categorie": "judo",
+                 "journee": False, "debut": "2026-10-07T16:30:00+02:00"}
+        faux, tt = self.lancer([ligne], [], {"Privé": "cal-prive"})
+        self.assertFalse(any(a[0] == "PATCH" for a in faux.appels), "sinon le judo serait reposé en boucle")
+
+
+class GardeDeplacee(unittest.TestCase):
+    """Une semaine de garde décalée dans TimeTree : RECURRENCE-ID, sans doublon."""
+    def test_occurrence_deplacee(self):
+        texte = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:garde
+SUMMARY:👨‍👦‍👦
+DTSTART;VALUE=DATE:20261002
+DTEND;VALUE=DATE:20261009
+RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL=20261231
+END:VEVENT
+BEGIN:VEVENT
+UID:garde
+SUMMARY:👨‍👦‍👦
+RECURRENCE-ID;VALUE=DATE:20261016
+DTSTART;VALUE=DATE:20261023
+DTEND;VALUE=DATE:20261030
+END:VEVENT
+BEGIN:VEVENT
+UID:garde
+SUMMARY:👨‍👦‍👦
+RECURRENCE-ID;VALUE=DATE:20261113
+STATUS:CANCELLED
+DTSTART;VALUE=DATE:20261113
+DTEND;VALUE=DATE:20261120
+END:VEVENT
+END:VCALENDAR
+"""
+        lignes = ts.evenements_agenda("Privé", texte, date(2026, 10, 1))
+        debuts = sorted(l["debut"][:10] for l in lignes)
+        self.assertNotIn("2026-10-16", debuts, "la date d'origine disparaît")
+        self.assertIn("2026-10-23", debuts, "la nouvelle date apparaît")
+        self.assertNotIn("2026-11-13", debuts, "l'occurrence annulée disparaît")
+        self.assertEqual(debuts.count("2026-10-23"), 1)
+        deplacee = [l for l in lignes if l["debut"][:10] == "2026-10-23"][0]
+        self.assertEqual(deplacee["timetree_uid"], "garde#2026-10-16", "même clé que l'occurrence d'origine")
+
+
+class Judo(unittest.TestCase):
+    """La règle du judo suit les semaines de garde."""
+    AUJ = date(2026, 10, 5)
+    CONGES = {(date(2026, 10, 17), date(2026, 11, 1)), (date(2026, 12, 19), date(2027, 1, 3))}
+
+    def garde(self, d0, d1):
+        return {"debut": d0 + "T00:00:00+00:00", "fin": d1 + "T00:00:00+00:00", "journee": True}
+
+    def judo(self, i, iso):
+        return {"id": i, "debut": iso, "categorie": "judo", "timetree_uid": "u-%d" % i}
+
+    def test_mercredis_de_garde_hors_vacances_et_feries(self):
+        gardes = [self.garde("2026-10-09", "2026-10-16"), self.garde("2026-10-23", "2026-10-30"),
+                  self.garde("2026-11-06", "2026-11-13")]
+        a_creer, a_retirer = rr.plan(gardes, [], [], self.CONGES, self.AUJ)
+        jours = [l["debut"][:10] for l in a_creer]
+        # 14/10 garde ; 28/10 vacances ; 11/11 férié
+        self.assertEqual(jours, ["2026-10-14"])
+        self.assertEqual(a_creer[0]["debut"], "2026-10-14T16:30:00+02:00")
+        self.assertEqual(a_creer[0]["fin"], "2026-10-14T18:15:00+02:00")
+        self.assertEqual(a_creer[0]["categorie"], "judo")
+        self.assertEqual(a_retirer, [])
+
+    def test_la_garde_bouge_le_judo_suit(self):
+        # le judo du 14/10 existe, mais la garde a glissé à la semaine du 9 novembre
+        gardes = [self.garde("2026-11-13", "2026-11-20")]
+        existant = self.judo(1, "2026-10-14T14:30:00+00:00")
+        a_creer, a_retirer = rr.plan(gardes, [existant], [], self.CONGES, self.AUJ)
+        self.assertEqual([l["debut"][:10] for l in a_creer], ["2026-11-18"])
+        self.assertEqual(a_retirer, [existant])
+
+    def test_judo_deplace_dans_la_semaine_reste(self):
+        gardes = [self.garde("2026-10-09", "2026-10-16")]
+        jeudi = self.judo(2, "2026-10-15T14:30:00+00:00")
+        self.assertEqual(rr.plan(gardes, [jeudi], [], self.CONGES, self.AUJ), ([], []))
+
+    def test_judo_annule_ne_revient_pas(self):
+        gardes = [self.garde("2026-10-09", "2026-10-16")]
+        annule = {"id": 3, "debut": "2026-10-14T14:30:00+00:00", "categorie": "judo_annule"}
+        self.assertEqual(rr.plan(gardes, [], [annule], self.CONGES, self.AUJ), ([], []))
+
+    def test_rien_apres_juin_2027(self):
+        gardes = [self.garde("2027-06-25", "2027-07-09")]
+        a_creer, _ = rr.plan(gardes, [], [], set(), date(2027, 6, 1))
+        self.assertEqual([l["debut"][:10] for l in a_creer], ["2027-06-30"])
+
+
+import regles_agenda as rr
 
 
 if __name__ == "__main__":
