@@ -134,10 +134,12 @@ def htmlify(text):
     return esc.replace("\n", "<br>\n")
 
 
-def build_message(acc, dest, subject, body, sig, in_reply_to=None):
+def build_message(acc, dest, subject, body, sig, in_reply_to=None, pieces=None):
     """Monte un message texte + HTML avec la signature de la boîte (images CID
     comprises). Partagé par les RÉPONSES (send_one) et les envois NOUVEAUX
-    (send_envois_mail : relances de loyer, courriers SCI)."""
+    (send_envois_mail : relances de loyer, baux au comptable, courriers SCI).
+
+    `pieces` : [{"nom": ..., "b64": ...}], pièces jointes posées par le cockpit."""
     sig = sig or {}
     text_sig = (sig.get("texte") or "").strip()
     html_sig = (sig.get("html") or "").strip()
@@ -193,6 +195,30 @@ def build_message(acc, dest, subject, body, sig, in_reply_to=None):
         with open(lp_legacy, "rb") as fh:
             html_part.add_related(fh.read(), maintype="image", subtype="png", cid=legacy_cid)
 
+    # Pièces jointes (bail signé, caution solidaire, état des lieux...). Ajoutées
+    # APRÈS les parties alternatives : add_attachment bascule le message en
+    # multipart/mixed sans casser le couple texte/HTML.
+    for pj in (pieces or []):
+        nom = (pj.get("nom") or "piece.pdf").replace("/", "-").replace("\\", "-")
+        try:
+            data = base64.b64decode(pj.get("b64") or "")
+        except Exception:
+            continue
+        if not data:
+            continue
+        if nom.lower().endswith(".ics"):
+            # Un .ics doit arriver en text/calendar, sinon iOS et Android ne
+            # proposent pas « ajouter au calendrier » (missions, 0069).
+            # add_attachment attend une str quand maintype vaut "text".
+            try:
+                texte = data.decode("utf-8")
+            except UnicodeDecodeError:
+                texte = data.decode("utf-8", "replace")
+            msg.add_attachment(texte, maintype="text", subtype="calendar", filename=nom)
+            continue
+        sub = "pdf" if nom.lower().endswith(".pdf") else "octet-stream"
+        msg.add_attachment(data, maintype="application", subtype=sub, filename=nom)
+
     return msg
 
 
@@ -240,7 +266,7 @@ def send_envois_mail(e, accounts, sigs):
     Sert aujourd'hui aux RELANCES DE LOYER. Rien n'arrive ici tout seul : une
     ligne n'existe que si Julien a cliqué « Mettre en file d'envoi »."""
     try:
-        rows = supa_get(e, "envois_mail?statut=eq.a_envoyer&select=id,compte,destinataire,sujet,corps,contexte")
+        rows = supa_get(e, "envois_mail?statut=eq.a_envoyer&select=id,compte,destinataire,sujet,corps,contexte,pieces")
     except Exception as ex:
         print("   ⚠️ file d'envoi illisible :", ex); return
     if not rows:
@@ -257,12 +283,18 @@ def send_envois_mail(e, accounts, sigs):
         if not dest or not corps:
             supa_write(e, f"envois_mail?id=eq.{r['id']}", {"statut": "echec", "erreur": "destinataire ou corps vide"}); continue
         try:
+            pieces = r.get("pieces") or []
             msg = build_message(acc, dest, (r.get("sujet") or "").strip() or "(sans objet)",
-                                corps, sigs.get(acc.get("email")) or sigs.get(r.get("compte")))
+                                corps, sigs.get(acc.get("email")) or sigs.get(r.get("compte")),
+                                pieces=pieces)
             expedier(acc, msg)
+            # Le base64 ne sert plus : on le purge pour ne pas laisser dormir des
+            # PDF en base (même geste que envois_compta).
             supa_write(e, f"envois_mail?id=eq.{r['id']}",
-                       {"statut": "envoye", "erreur": None, "envoye_at": datetime.now(timezone.utc).isoformat()})
-            print(f"   ✅ {r.get('contexte') or 'envoi'} -> {dest}")
+                       {"statut": "envoye", "erreur": None, "pieces": [],
+                        "envoye_at": datetime.now(timezone.utc).isoformat()})
+            pj = f" (+{len(pieces)} PJ)" if pieces else ""
+            print(f"   ✅ {r.get('contexte') or 'envoi'} -> {dest}{pj}")
         except Exception as ex:
             supa_write(e, f"envois_mail?id=eq.{r['id']}", {"statut": "echec", "erreur": str(ex)[:300]})
             print(f"   ❌ envoi {r['id']} : {ex}")
@@ -420,7 +452,7 @@ def main():
                 "from_addr": mail.get("from_addr"), "sujet": mail.get("sujet"),
                 "extrait": (mail.get("corps") or "")[:400], "reponse": mail.get("brouillon"),
             }], method="POST")
-            print(f"   ✅ envoyé -> {mail.get('from_addr')} (mail {mail['id']})")
+            print(f"   ✅ envoyé -> {vrai_destinataire(mail.get('from_addr'), mail.get('corps'))} (mail {mail['id']})")
         else:
             # Échec : on remet le mail "à traiter" (le cockpit l'avait passé en traité
             # de façon optimiste au clic) et on retire la demande (pas de renvoi en boucle).
