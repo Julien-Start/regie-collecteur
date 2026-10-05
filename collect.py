@@ -316,6 +316,69 @@ def supa_patch(env, path, payload):
         return False
 
 
+def _collapse_doublons(cluster, doublons):
+    """Dans une grappe de copies identiques reçues de près : garde UNE copie (répondue
+    en priorité, sinon la plus ancienne) et marque les autres copies non répondues
+    comme doublons à ranger."""
+    if len(cluster) < 2:
+        return
+    repondus = [m for m in cluster if m.get("repondu")]
+    garder = repondus[0] if repondus else cluster[0]
+    for m in cluster:
+        if m["id"] != garder["id"] and not m.get("repondu") and m.get("statut") == "a_traiter":
+            doublons.append(m["id"])
+
+
+def dedup_contact_mails(env):
+    """Le formulaire du site rejoue parfois la même « Demande de contact » plusieurs
+    fois en quelques secondes (double-clic, renvoi). On garde une seule copie par
+    demande (même boîte + même corps, reçues dans un court intervalle) et on range les
+    autres en 'traité', pour ne plus rejouer le jeu de la taupe. On ne déclasse jamais
+    une copie déjà répondue, et on conserve en priorité celle qui l'a été."""
+    import datetime
+    rows = supa_get_all(env,
+        "mails?sujet=ilike.*demande*contact*"
+        "&statut=in.(a_traiter,traite)&is_newsletter=eq.false"
+        "&select=id,boite,corps,date_recue,repondu,statut&order=id.asc")
+
+    def _dt(s):
+        try:
+            d = datetime.datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+            return d.replace(tzinfo=datetime.timezone.utc) if d.tzinfo is None else d
+        except Exception:
+            return None
+
+    MINI = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    WINDOW = datetime.timedelta(hours=1)  # au-delà, c'est une vraie nouvelle demande, pas un doublon
+
+    groups = {}
+    for m in rows:
+        corps = re.sub(r"\s+", " ", (m.get("corps") or "")).strip()
+        if corps:
+            groups.setdefault(((m.get("boite") or ""), corps), []).append(m)
+
+    doublons = []
+    for grp in groups.values():
+        if len(grp) < 2:
+            continue
+        grp.sort(key=lambda m: _dt(m.get("date_recue")) or MINI)
+        cluster = [grp[0]]
+        for m in grp[1:]:
+            t0, t1 = _dt(cluster[-1].get("date_recue")), _dt(m.get("date_recue"))
+            if t0 and t1 and (t1 - t0) <= WINDOW:
+                cluster.append(m)
+            else:
+                _collapse_doublons(cluster, doublons)
+                cluster = [m]
+        _collapse_doublons(cluster, doublons)
+
+    doublons = sorted(set(doublons))
+    if doublons:
+        ids = ",".join(str(i) for i in doublons)
+        supa_patch(env, f"mails?id=in.({ids})", {"statut": "traite"})
+        print(f"🧹 {len(doublons)} doublon(s) de « Demande de contact » rangé(s) (une seule copie gardée par demande).")
+
+
 def process_deletions(env, accounts):
     # Déplace en Corbeille les mails marqués 'a_supprimer', ET réessaie les 'suppr_echec'
     # (échecs passés). Jamais de suppression définitive : sans Corbeille atteignable on garde 'suppr_echec'.
@@ -734,6 +797,10 @@ def main():
     # pas newsletter (l'envoi répondra à l'email du corps, pas au noreply@).
     supa_patch(env, "mails?sujet=ilike.*demande*contact*&is_newsletter=eq.true&statut=not.in.(traite,supprime,archive,a_supprimer,suppr_echec)",
                {"categorie": "cavalier", "is_newsletter": False, "statut": "a_traiter"})
+
+    # Le formulaire rejoue parfois la même demande en quelques secondes : on ne garde
+    # qu'une copie à traiter par demande (les autres passent 'traité').
+    dedup_contact_mails(env)
 
     # Notifications Stripe "en faveur de Paddockroom" -> catégorie 'paddockroom'.
     supa_patch(env, "mails?sujet=ilike.*en%20faveur%20de%20Paddockroom*&categorie=neq.paddockroom",
