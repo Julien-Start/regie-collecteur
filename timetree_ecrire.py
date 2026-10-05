@@ -27,7 +27,8 @@ import timetree_sync as ts
 
 API = "https://timetreeapp.com/api/v1"
 MAX_TENTATIVES = 3
-ORDRE = {"creer": 0, "modifier": 1, "copier": 2, "retirer_copie": 3, "supprimer": 4}
+ORDRE = {"creer": 0, "modifier": 1, "copier": 2, "copier_mission": 2,
+         "retirer_copie": 3, "retirer_copie_mission": 3, "supprimer": 4}
 
 
 def normaliser(s):
@@ -59,6 +60,20 @@ def contenu(ev):
              "end_at": minuit_utc_ms(ev.get("date_fin") or debut), "end_timezone": "UTC"}
     if ev.get("lieu") and normaliser(ev["lieu"]) != normaliser(corps["title"]):
         corps["location"] = ev["lieu"]
+    return corps
+
+
+def contenu_mission(mi):
+    """Comme contenu(), mais pour une MISSION : ce sont SES dates qui font foi.
+    Le renfort n'est pas toujours utile toute la durée du concours, et une
+    mission peut n'être rattachée à aucun concours. Journée entière, minuit UTC
+    du premier et du dernier jour (même convention que les concours)."""
+    debut = mi["date_debut"]
+    corps = {"title": mi["titre"], "all_day": True,
+             "start_at": minuit_utc_ms(debut), "start_timezone": "UTC",
+             "end_at": minuit_utc_ms(mi.get("date_fin") or debut), "end_timezone": "UTC"}
+    if mi.get("lieu") and normaliser(mi["lieu"]) != normaliser(corps["title"]):
+        corps["location"] = mi["lieu"]
     return corps
 
 
@@ -250,7 +265,8 @@ class TimeTree:
 def main():
     env = ts.charger_env()
     attente = ts.requete(env, "GET", "ecritures_timetree?statut=eq.a_envoyer"
-                                     "&select=id,evenement_id,action,personne,tentatives&order=id") or []
+                                     "&select=id,evenement_id,mission_id,action,personne,tentatives"
+                                     "&order=id") or []
     # Le calendrier unifié : événements planifiés dans La Régie, à poser ou à retirer.
     try:
         agenda_creer, agenda_modifier, agenda_retirer = agenda_a_faire(env)
@@ -284,12 +300,54 @@ def main():
     calendrier_de = {p["nom"]: p["calendrier"] for p in pers if p.get("calendrier")}
     etiquette_de = {p["nom"]: p.get("etiquette") for p in pers}
 
-    attente.sort(key=lambda e: (e["evenement_id"], ORDRE.get(e["action"], 9), e["id"]))
+    attente.sort(key=lambda e: (e.get("evenement_id") or 0, e.get("mission_id") or 0,
+                                ORDRE.get(e["action"], 9), e["id"]))
     faits = echecs = 0
     for e in attente:
         maintenant = datetime.now(timezone.utc).isoformat()
-        eid, action, personne = e["evenement_id"], e["action"], e.get("personne")
+        eid, action, personne = e.get("evenement_id"), e["action"], e.get("personne")
+        mid = e.get("mission_id")
         try:
+            # Une MISSION dans l'agenda d'un prestataire : ses dates à elle font
+            # foi (0073). Chemin séparé de celui des concours, pour que la boucle
+            # qui fait suivre les copies d'un concours ne vienne jamais réécrire
+            # ces dates-là.
+            if mid:
+                mi = (ts.requete(env, "GET",
+                      "missions?id=eq.%s&select=titre,lieu,date_debut,date_fin" % mid) or [None])[0]
+                if not mi:
+                    raise RuntimeError("mission supprimée de La Régie")
+                copies_m = ts.requete(env, "GET", "copies_mission_timetree?mission_id=eq.%s"
+                                      "&select=id,personne,calendrier,uuid" % mid) or []
+                corps_m = contenu_mission(mi)
+
+                if action == "copier_mission":
+                    if not any(c["personne"] == personne for c in copies_m):
+                        nom_cal = calendrier_de.get(personne)
+                        if not nom_cal:
+                            raise RuntimeError("cette personne n'a pas de calendrier TimeTree")
+                        cal_copie = tt.calendrier(nom_cal)
+                        lab = tt.etiquette(cal_copie, etiquette_de.get(personne))
+                        uuid = tt.creer(cal_copie, dict(corps_m, label_id=lab) if lab else corps_m)
+                        ts.requete(env, "POST",
+                                   "copies_mission_timetree?on_conflict=mission_id,personne",
+                                   [{"mission_id": mid, "personne": personne,
+                                     "calendrier": nom_cal, "uuid": uuid}],
+                                   prefer="resolution=merge-duplicates,return=minimal")
+
+                elif action == "retirer_copie_mission":
+                    for c in copies_m:
+                        if c["personne"] == personne:
+                            tt.supprimer(tt.calendrier(c["calendrier"]), c["uuid"])
+                            ts.requete(env, "DELETE", "copies_mission_timetree?id=eq.%s" % c["id"],
+                                       prefer="return=minimal")
+
+                ts.requete(env, "PATCH", "ecritures_timetree?id=eq.%s" % e["id"],
+                           {"statut": "envoye", "message": None, "traite_le": maintenant,
+                            "tentatives": (e.get("tentatives") or 0) + 1}, prefer="return=minimal")
+                faits += 1
+                continue
+
             ev = (ts.requete(env, "GET", "evenements?id=eq.%s&select=*" % eid) or [None])[0]
             if not ev:
                 raise RuntimeError("concours supprimé de La Régie")
