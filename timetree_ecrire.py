@@ -27,8 +27,9 @@ import timetree_sync as ts
 
 API = "https://timetreeapp.com/api/v1"
 MAX_TENTATIVES = 3
-ORDRE = {"creer": 0, "modifier": 1, "copier": 2, "copier_mission": 2,
-         "retirer_copie": 3, "retirer_copie_mission": 3, "supprimer": 4}
+ORDRE = {"creer": 0, "modifier": 1, "modifier_mission": 1, "copier": 2,
+         "copier_mission": 2, "retirer_copie": 3, "retirer_copie_mission": 3,
+         "supprimer": 4}
 
 
 def normaliser(s):
@@ -334,6 +335,15 @@ def main():
                                    [{"mission_id": mid, "personne": personne,
                                      "calendrier": nom_cal, "uuid": uuid}],
                                    prefer="resolution=merge-duplicates,return=minimal")
+
+                elif action == "modifier_mission":
+                    # La mission a bougé (dates, horaires, lieu) : la copie suit.
+                    for c in copies_m:
+                        if c["personne"] == personne:
+                            cal_copie = tt.calendrier(c["calendrier"])
+                            lab = tt.etiquette(cal_copie, etiquette_de.get(personne))
+                            tt.modifier(cal_copie, c["uuid"],
+                                        dict(corps_m, label_id=lab) if lab else corps_m)
 
                 elif action == "retirer_copie_mission":
                     for c in copies_m:
