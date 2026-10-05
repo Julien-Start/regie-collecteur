@@ -427,6 +427,16 @@ def main():
     except Exception:
         pass
 
+    # Rappels de mission (0070) : J-7 et le mardi qui précède le concours. La
+    # fonction ne met en file QUE les rappels des missions en canal mail ; ceux
+    # en WhatsApp restent dus et attendent que Julien les tape dans le cockpit.
+    try:
+        r = supa_write(e, "rpc/envoyer_rappels", {}, method="POST")
+        if r:
+            print("   ⏰ rappels de mission mis en file")
+    except Exception as ex:
+        print("   ⚠️ rappels de mission :", ex)
+
     send_envois_mail(e, accounts, sigs)   # file générique : relances de loyer, courriers SCI
 
     pending = supa_get(e, "mails?envoi_demande=eq.true&repondu=eq.false"
