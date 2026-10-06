@@ -1,6 +1,8 @@
 name: Envoi des réponses
 
 on:
+  schedule:
+    - cron: "*/15 * * * *"   # vide la file envois_mail (confirmations de mission, « poste pourvu », relances) toute seule
   workflow_dispatch: {}
 
 concurrency:
