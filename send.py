@@ -208,13 +208,12 @@ def build_message(acc, dest, subject, body, sig, in_reply_to=None, pieces=None):
             continue
         if nom.lower().endswith(".ics"):
             # Un .ics doit arriver en text/calendar, sinon iOS et Android ne
-            # proposent pas « ajouter au calendrier » (missions, 0069).
-            # add_attachment attend une str quand maintype vaut "text".
-            try:
-                texte = data.decode("utf-8")
-            except UnicodeDecodeError:
-                texte = data.decode("utf-8", "replace")
-            msg.add_attachment(texte, maintype="text", subtype="calendar", filename=nom)
+            # proposent pas « ajouter au calendrier » (missions, 0069). Avec une
+            # str, add_attachment déduit maintype="text" tout seul et route vers
+            # set_text_content — passer maintype="text" explicitement le fait
+            # planter (« set_text_content() got an unexpected keyword 'maintype' »).
+            texte = data.decode("utf-8", "replace")
+            msg.add_attachment(texte, subtype="calendar", filename=nom)
             continue
         sub = "pdf" if nom.lower().endswith(".pdf") else "octet-stream"
         msg.add_attachment(data, maintype="application", subtype=sub, filename=nom)
