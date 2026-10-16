@@ -104,6 +104,7 @@ def main():
     a_repointer = [(e["id"], e["timetree_uid"], old2new[e["timetree_uid"]])
                    for e in evs if e.get("timetree_uid") in old2new]
     sans_jumeau = [e for e in evs if e.get("timetree_uid") not in old2new]
+    print("IDs des concours sans jumeau : %s" % ", ".join(str(e["id"]) for e in sans_jumeau))
     print("Concours La Régie (source=timetree) : %d ; à re-pointer : %d ; sans jumeau net : %d"
           % (len(evs), len(a_repointer), len(sans_jumeau)))
 
