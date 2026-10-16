@@ -56,6 +56,10 @@ def resoudre(actifs, cle):
     for m in actifs:                                   # nom de l'agenda
         if norm(m.get("name")) == norm(cle):
             return m
+    for m in actifs:                                   # dernier filet : n'importe quel champ identifiant
+        for v in m.values():
+            if isinstance(v, (str, int)) and str(v) == cle:
+                return m
     return None
 
 
@@ -185,6 +189,8 @@ def main():
         print("Agenda destination introuvable.")
         print("Diagnostic : %d agenda(s) actif(s) vus par ce compte (dont %d avec un code) ; "
               "valeur DST reçue : %s de longueur %d." % (len(actifs), avec_code, kind, len(brut)))
+        if actifs:
+            print("Champs d'identité disponibles par agenda : %s" % ", ".join(sorted(actifs[0].keys())))
         print("Pistes : (1) crée et OUVRE l'agenda dans l'appli avec CE compte TimeTree ; "
               "(2) mets dans TIMETREE_DST soit le NOM exact de l'agenda, soit le code seul "
               "(la partie après le dernier / de l'URL de partage), pas l'URL entière.")
