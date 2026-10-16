@@ -35,15 +35,22 @@ def norm(s):
 
 
 def resoudre(actifs, cle):
-    """Trouve un calendrier par code (alias_code, avec ou sans '#') ou par nom."""
+    """Trouve un calendrier par code (alias_code), par URL de partage, ou par nom."""
     cle = (cle or "").strip()
     if not cle:
         return None
+    # URL de partage collée -> on garde le dernier segment (le code).
+    u = re.search(r"timetreeapp\.com/\w+/([A-Za-z0-9_-]+)", cle)
+    if u:
+        cle = u.group(1)
     code = cle[1:] if cle.startswith("#") else cle
-    for m in actifs:
+    for m in actifs:                                   # code exact
         if m.get("alias_code") == code:
             return m
-    for m in actifs:
+    for m in actifs:                                   # code insensible à la casse
+        if (m.get("alias_code") or "").lower() == code.lower():
+            return m
+    for m in actifs:                                   # nom de l'agenda
         if norm(m.get("name")) == norm(cle):
             return m
     return None
@@ -169,7 +176,15 @@ def main():
         print("Agenda source introuvable.")
         return 1
     if not dst:
-        print("Agenda destination introuvable (crée-le et ouvre-le d'abord dans TimeTree).")
+        avec_code = sum(1 for m in actifs if m.get("alias_code"))
+        brut = (os.environ.get("TIMETREE_DST") or "").strip()
+        kind = "URL" if "timetreeapp.com" in brut else ("code/nom")
+        print("Agenda destination introuvable.")
+        print("Diagnostic : %d agenda(s) actif(s) vus par ce compte (dont %d avec un code) ; "
+              "valeur DST reçue : %s de longueur %d." % (len(actifs), avec_code, kind, len(brut)))
+        print("Pistes : (1) crée et OUVRE l'agenda dans l'appli avec CE compte TimeTree ; "
+              "(2) mets dans TIMETREE_DST soit le NOM exact de l'agenda, soit le code seul "
+              "(la partie après le dernier / de l'URL de partage), pas l'URL entière.")
         return 1
     if src["id"] == dst["id"]:
         print("Source et destination sont le même agenda : rien à faire.")
