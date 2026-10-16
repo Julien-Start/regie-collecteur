@@ -44,6 +44,9 @@ def resoudre(actifs, cle):
     if u:
         cle = u.group(1)
     code = cle[1:] if cle.startswith("#") else cle
+    for m in actifs:                                   # identifiant interne (id)
+        if str(m.get("id")) == code or str(m.get("id")).lower() == code.lower():
+            return m
     for m in actifs:                                   # code exact
         if m.get("alias_code") == code:
             return m
