@@ -1,0 +1,45 @@
+name: Supprimer des événements d'un agenda TimeTree
+
+# Lancé à la main. Supprime des événements PRÉCIS (par uuid) d'un agenda.
+# Par défaut en SIMULATION : coche « confirmer » pour supprimer réellement.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmer:
+        description: "Supprimer réellement (sinon simulation)"
+        type: boolean
+        required: true
+        default: false
+      agenda:
+        description: "Agenda (nom ou code). Vide = Privé."
+        type: string
+        required: false
+        default: "Privé"
+      uids:
+        description: "UID des événements à supprimer (séparés par des virgules)."
+        type: string
+        required: true
+
+jobs:
+  supprimer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Supprimer
+        env:
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_CAL: ${{ inputs.agenda }}
+          TIMETREE_UIDS: ${{ inputs.uids }}
+          CONFIRM: ${{ inputs.confirmer && '1' || '' }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then
+            echo "Secrets TimeTree absents."
+            exit 1
+          fi
+          python -m pip install --quiet timetree-exporter requests
+          python timetree_supprimer.py
