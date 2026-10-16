@@ -1,0 +1,47 @@
+name: Re-pointer les concours vers le nouvel agenda
+
+# Lancé à la main. Remplace, dans la base La Régie, l'ancien uuid de chaque
+# concours (source=timetree) par celui de son jumeau dans le nouvel agenda
+# (TIMETREE_DST), apparié par titre + dates. À faire AVANT de basculer la
+# variable TIMETREE_CALENDRIERS sur le nouvel agenda.
+# Par défaut en SIMULATION : coche « confirmer » pour écrire en base.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmer:
+        description: "Écrire en base (sinon simulation)"
+        type: boolean
+        required: true
+        default: false
+      source:
+        description: "Ancien agenda (nom ou code). Vide = D'clik agency (défaut)."
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  repointer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Re-pointer
+        env:
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_SRC: ${{ inputs.source != '' && inputs.source || secrets.TIMETREE_SRC }}
+          TIMETREE_DST: ${{ secrets.TIMETREE_DST }}
+          TIMETREE_CALENDAR_CODE: ${{ secrets.TIMETREE_CALENDAR_CODE }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CONFIRM: ${{ inputs.confirmer && '1' || '' }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ] || [ -z "$TIMETREE_DST" ]; then
+            echo "Secrets TimeTree incomplets."
+            exit 1
+          fi
+          python -m pip install --quiet timetree-exporter requests
+          python timetree_repointer.py
