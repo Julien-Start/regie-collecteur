@@ -17,6 +17,16 @@ on:
         type: boolean
         required: true
         default: false
+      source:
+        description: "Agenda source (nom ou code). Vide = D'clik agency (défaut)."
+        type: string
+        required: false
+        default: ""
+      uids:
+        description: "Copier seulement ces événements (UID séparés par des virgules). Vide = tout l'agenda."
+        type: string
+        required: false
+        default: ""
 
 jobs:
   dupliquer:
@@ -32,9 +42,10 @@ jobs:
         env:
           TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
           TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
-          TIMETREE_SRC: ${{ secrets.TIMETREE_SRC }}
+          TIMETREE_SRC: ${{ inputs.source != '' && inputs.source || secrets.TIMETREE_SRC }}
           TIMETREE_DST: ${{ secrets.TIMETREE_DST }}
           TIMETREE_CALENDAR_CODE: ${{ secrets.TIMETREE_CALENDAR_CODE }}
+          TIMETREE_UIDS: ${{ inputs.uids }}
           CONFIRM: ${{ inputs.confirmer && '1' || '' }}
         run: |
           if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then

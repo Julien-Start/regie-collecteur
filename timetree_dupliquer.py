@@ -199,8 +199,13 @@ def main():
         print("Source et destination sont le même agenda : rien à faire.")
         return 1
 
+    uids_env = (os.environ.get("TIMETREE_UIDS") or "").strip()
+    uid_filter = set(u for u in re.split(r"[,\s]+", uids_env) if u) if uids_env else None
+
     events = reader.get_events(src["id"], src.get("name"))
-    a_faire = [e for e in events if a_copier(e)]
+    a_faire = [e for e in events if a_copier(e) and (uid_filter is None or e.get("uuid") in uid_filter)]
+    if uid_filter is not None:
+        print("Filtre : %d identifiant(s) demandé(s), %d retrouvé(s) dans la source." % (len(uid_filter), len(a_faire)))
     print("Source : %d événement(s) lus, %d à copier." % (len(events), len(a_faire)))
 
     lab_map = map_etiquettes(reader, src["id"], dst["id"])
