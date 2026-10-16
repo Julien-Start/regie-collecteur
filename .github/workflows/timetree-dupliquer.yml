@@ -1,0 +1,49 @@
+name: Dupliquer un agenda TimeTree
+
+# Lancé à la main uniquement. Copie UNE fois tous les événements d'un agenda
+# TimeTree SOURCE vers un agenda DESTINATION déjà créé dans l'appli.
+# Par défaut en SIMULATION (compte ce qui serait créé) : coche « confirmer »
+# pour écrire réellement. Aucun suivi d'UID : relancer referait des doublons.
+#
+# Secrets requis : TIMETREE_EMAIL, TIMETREE_PASSWORD, TIMETREE_DST
+# (code ou nom de l'agenda destination). La source vaut TIMETREE_SRC si présent,
+# sinon TIMETREE_CALENDAR_CODE (= D'clik agency).
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmer:
+        description: "Écrire réellement (sinon simulation)"
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  dupliquer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Copier l'agenda
+        env:
+          TIMETREE_EMAIL: ${{ secrets.TIMETREE_EMAIL }}
+          TIMETREE_PASSWORD: ${{ secrets.TIMETREE_PASSWORD }}
+          TIMETREE_SRC: ${{ secrets.TIMETREE_SRC }}
+          TIMETREE_DST: ${{ secrets.TIMETREE_DST }}
+          TIMETREE_CALENDAR_CODE: ${{ secrets.TIMETREE_CALENDAR_CODE }}
+          CONFIRM: ${{ inputs.confirmer && '1' || '' }}
+        run: |
+          if [ -z "$TIMETREE_EMAIL" ] || [ -z "$TIMETREE_PASSWORD" ]; then
+            echo "Secrets TimeTree absents."
+            exit 1
+          fi
+          if [ -z "$TIMETREE_DST" ]; then
+            echo "Secret TIMETREE_DST manquant (code ou nom de l'agenda destination)."
+            exit 1
+          fi
+          python -m pip install --quiet timetree-exporter requests
+          python timetree_dupliquer.py
