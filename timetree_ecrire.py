@@ -96,6 +96,8 @@ def contenu_agenda(row):
     corps = {"title": row["titre"]}
     if row.get("lieu"):
         corps["location"] = row["lieu"]
+    if row.get("note"):
+        corps["note"] = row["note"]
     if row.get("journee", True):
         # journée entière : minuit UTC du premier et du dernier jour, comme contenu().
         # En base, fin = fin EXCLUSIVE (lendemain du dernier jour, comme l'import) ; TimeTree
