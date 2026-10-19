@@ -98,6 +98,10 @@ def contenu_agenda(row):
         corps["location"] = row["lieu"]
     if row.get("note"):
         corps["note"] = row["note"]
+    # Rappels : liste de minutes AVANT le début (TimeTree : champ alerts, en minutes).
+    rappels = row.get("rappels")
+    if rappels:
+        corps["alerts"] = [int(x) for x in rappels if str(x).lstrip("-").isdigit()]
     if row.get("journee", True):
         # journée entière : minuit UTC du premier et du dernier jour, comme contenu().
         # En base, fin = fin EXCLUSIVE (lendemain du dernier jour, comme l'import) ; TimeTree
@@ -243,7 +247,8 @@ class TimeTree:
         return bleu, rouge
 
     def creer(self, cal_id, corps):
-        corps = dict(corps, category=1, attendees=[], alerts=[], recurrences=[], file_uuids=[])
+        corps = dict(corps, category=1, attendees=[], recurrences=[], file_uuids=[])
+        corps.setdefault("alerts", [])     # garde les alertes déjà posées (rappels), sinon aucune
         r = self.s.post("%s/calendar/%s/event" % (API, cal_id), headers=self.entetes, data=json.dumps(corps), timeout=20)
         if r.status_code >= 300:
             raise RuntimeError("création refusée par TimeTree (HTTP %s)" % r.status_code)
