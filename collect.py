@@ -806,6 +806,15 @@ def main():
     supa_patch(env, "mails?sujet=ilike.*en%20faveur%20de%20Paddockroom*&categorie=neq.paddockroom",
                {"categorie": "paddockroom", "is_newsletter": False})
 
+    # Alertes internes de La Régie (désistements) : elle se les envoie à elle-même
+    # (j.rouyer@dclik-agency.com), donc cette boîte les relève. Elles n'ont pas à
+    # être retriées : on les range 'traité' direct pour ne pas encombrer le cockpit.
+    # Julien les voit quand même dans Mail (iPhone) : c'est là qu'arrive le ping.
+    supa_patch(env, "mails?from_addr=eq.j.rouyer@dclik-agency.com&sujet=ilike.*sistement*&statut=eq.a_traiter",
+               {"categorie": "autre", "is_newsletter": False, "statut": "traite"})
+    supa_patch(env, "mails?from_addr=eq.j.rouyer@dclik-agency.com&sujet=ilike.*sinscription*&statut=eq.a_traiter",
+               {"categorie": "autre", "is_newsletter": False, "statut": "traite"})
+
     # Traite les suppressions demandées par Julien (déplacement en Corbeille).
     process_deletions(env, accounts)
 
