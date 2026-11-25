@@ -453,9 +453,21 @@ def synchroniser_personnes(env, personnes, essai):
         uuids_copies = {c["uuid"]: c["personne"] for c in tout_lire(env, "copies_timetree?select=uuid,personne")}
     except urllib.error.HTTPError:
         uuids_copies = {}
+    # Seuls les calendriers qui correspondent à une VRAIE personne du pool
+    # peuvent remplir l'équipe d'un concours. Les autres calendriers partagés
+    # (ex. « Training », un calendrier d'activité) sont lus pour l'agenda mais ne
+    # sont pas des intervenants : sans ce garde-fou, un event Training qui
+    # chevauche un concours l'affectait à une « personne » fantôme « Training ».
+    try:
+        noms_pool = {normaliser(x.get("nom", "")) for x in tout_lire(env, "personnes?select=nom")}
+    except urllib.error.HTTPError:
+        noms_pool = set()
+
     resume = []
     for nom, texte in personnes:
         stricte = normaliser(nom) == "julien"
+        if not stricte and noms_pool and normaliser(nom) not in noms_pool:
+            continue  # calendrier hors pool (Training…) : pas d'affectation concours
         items, _ = concours_de_l_agenda(texte, aujourd_hui)
         # Vérification des copies envoyées par La Régie : retrouvées, et avec quelle couleur.
         for p in items:
